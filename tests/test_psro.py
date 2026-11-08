@@ -18,10 +18,10 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import get_config, parse_env, resolve  # noqa: E402
-from seprso.budget import BudgetTracker  # noqa: E402
-from seprso.envs import make_env  # noqa: E402
-from seprso.meta_solvers import META_SOLVERS, is_two_player_zero_sum  # noqa: E402
-from seprso.policies import FixedActionPolicy, MixturePolicy, RandomPolicy  # noqa: E402
+from sepsro.budget import BudgetTracker  # noqa: E402
+from sepsro.envs import make_env  # noqa: E402
+from sepsro.meta_solvers import META_SOLVERS, is_two_player_zero_sum  # noqa: E402
+from sepsro.policies import FixedActionPolicy, MixturePolicy, RandomPolicy  # noqa: E402
 
 torch = pytest.importorskip('torch')
 
@@ -85,7 +85,7 @@ def _args(*extra):
 
 def _oracle_vs_rock(kind, *extra):
     """Train player_1 against 'always rock' with the RL oracle; return its policy."""
-    from seprso.oracles import RLOracle, make_learner_factory
+    from sepsro.oracles import RLOracle, make_learner_factory
 
     args = _args(*extra)
     env = make_env(args.env_preset)
@@ -115,7 +115,7 @@ def test_dqn_oracle_best_responds():
 
 @pytest.mark.parametrize('kind', ['pg', 'dqn'])
 def test_learners_respect_action_mask(kind):
-    from seprso.oracles import make_learner_factory
+    from sepsro.oracles import make_learner_factory
     env = make_env(parse_env('rps'))
     learner = make_learner_factory(kind, env.spec, _args())('player_0', seed=0)
     mask = np.array([False, True, False])
@@ -125,7 +125,7 @@ def test_learners_respect_action_mask(kind):
 
 
 def test_count_weighted_choice_balances_seats():
-    from seprso.oracles import random_count_weighted_choice
+    from sepsro.oracles import random_count_weighted_choice
     rng = np.random.default_rng(0)
     picks = [random_count_weighted_choice([0, 99], rng) for _ in range(2000)]
     assert np.mean(picks) < 0.05   # the seat with fewer episodes is picked ~100x as often
@@ -155,7 +155,7 @@ def test_psro_rps_end_to_end(tmp_path):
 
 
 def test_matrix_nash_conv():
-    from seprso.exploitability import matrix_nash_conv
+    from sepsro.exploitability import matrix_nash_conv
     env = make_env(parse_env('rps'))
     uniform = {a: RandomPolicy() for a in env.spec.agents}
     rock = {a: FixedActionPolicy(0) for a in env.spec.agents}
@@ -176,7 +176,7 @@ def test_psro_budget_is_charged(tmp_path):
 
 
 def test_prd_matches_openspiel_projection():
-    from seprso.meta_solvers import _simplex_projection
+    from sepsro.meta_solvers import _simplex_projection
     # The worked example in OpenSpiel's docstring.
     np.testing.assert_allclose(_simplex_projection(np.array([0.4, 0.7, 0.6]), 0.2),
                                [0.2, 0.45, 0.35])
@@ -187,7 +187,7 @@ def test_prd_matches_openspiel_projection():
 def test_nash_conv_uniform_kuhn_matches_openspiel():
     from open_spiel.python import policy as os_policy
     from open_spiel.python.algorithms import exploitability
-    from seprso.exploitability import nash_conv
+    from sepsro.exploitability import nash_conv
 
     env = make_env(parse_env('kuhn_poker'))
     ours = nash_conv(env, {a: RandomPolicy() for a in env.spec.agents}, None, 0)['nash_conv']
@@ -203,7 +203,7 @@ def test_mixture_is_aggregated_by_reach():
     After player 0 has bet, only the always-bet member can be playing, so at
     player 0's later decisions the aggregate must follow always-bet exactly.
     """
-    from seprso.exploitability import aggregate
+    from sepsro.exploitability import aggregate
 
     env = make_env(parse_env('kuhn_poker'))
     mix = MixturePolicy([FixedActionPolicy(1), FixedActionPolicy(0)], [0.5, 0.5])
@@ -242,8 +242,8 @@ def test_br_oracle_is_exact():
     from open_spiel.python import policy as os_policy
     from open_spiel.python.algorithms import exploitability as os_expl
     from open_spiel.python.algorithms import expected_game_score
-    from seprso.exploitability import aggregate
-    from seprso.oracles import BestResponseOracle
+    from sepsro.exploitability import aggregate
+    from sepsro.oracles import BestResponseOracle
 
     env = make_env(parse_env('kuhn_poker'))
     mixtures = {a: MixturePolicy([RandomPolicy()], [1.0]) for a in env.spec.agents}

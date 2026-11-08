@@ -1,10 +1,10 @@
-# SEPRSO dependencies.
+# SEPSRO dependencies.
 #
 # torch is deliberately NOT listed: the right build depends on your CUDA
 # version, so install it first from the PyTorch index. Nothing in the scaffold
 # imports it yet; methods will.
 #
-#   conda create -n seprso python=3.10 -y && conda activate seprso
+#   conda create -n sepsro python=3.10 -y && conda activate sepsro
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 #   pip install -r requirements.txt
 

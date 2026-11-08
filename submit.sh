@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Submit SEPRSO runs to Slurm (Digital Research Alliance clusters).
+# Submit SEPSRO runs to Slurm (Digital Research Alliance clusters).
 #
 # Same knobs as run.sh -- every (method, seed) pair becomes one task of a job
 # array, so seeds run in parallel on separate nodes/cores:
@@ -20,32 +20,32 @@
 # and refuses run directories that already hold logs unless --overwrite is
 # among the main.py flags -- the same rule main.py enforces, checked early.
 #
-# Resources default to CPU-only: SEPRSO's learners run on CPU (rollouts are one
+# Resources default to CPU-only: SEPSRO's learners run on CPU (rollouts are one
 # step at a time), so a GPU would sit idle. --gpus 1 requests one per task.
 #
 # Slurm settings come from flags or environment:
-#   --account   (or $SEPRSO_ACCOUNT)   required by Alliance clusters
-#   --time      (or $SEPRSO_TIME)      default 24:00:00
-#   --mem       (or $SEPRSO_MEM)       default 16G
-#   --cpus      (or $SEPRSO_CPUS)      default 4  (also torch / OpenMP threads)
-#   --gpus      (or $SEPRSO_GPUS)      default 0
-#   --gpu-type  (or $SEPRSO_GPU_TYPE)  e.g. h100; with --gpus
-#   --venv      (or $SEPRSO_VENV)      default ~/venvs/seprso
-#   --out-root  (or $SEPRSO_OUT)       default <repo>/results; ~/scratch/... for big sweeps
+#   --account   (or $SEPSRO_ACCOUNT)   required by Alliance clusters
+#   --time      (or $SEPSRO_TIME)      default 24:00:00
+#   --mem       (or $SEPSRO_MEM)       default 16G
+#   --cpus      (or $SEPSRO_CPUS)      default 4  (also torch / OpenMP threads)
+#   --gpus      (or $SEPSRO_GPUS)      default 0
+#   --gpu-type  (or $SEPSRO_GPU_TYPE)  e.g. h100; with --gpus
+#   --venv      (or $SEPSRO_VENV)      default ~/venvs/sepsro
+#   --out-root  (or $SEPSRO_OUT)       default <repo>/results; ~/scratch/... for big sweeps
 #   --python-module                    default python/3.11 (must match setup_cluster.sh)
 #   --dry-run                          write and print the job script, submit nothing
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-ACCOUNT="${SEPRSO_ACCOUNT:-}"
-TIME="${SEPRSO_TIME:-24:00:00}"
-MEM="${SEPRSO_MEM:-16G}"
-CPUS="${SEPRSO_CPUS:-4}"
-GPUS="${SEPRSO_GPUS:-0}"
-GPU_TYPE="${SEPRSO_GPU_TYPE:-}"
-VENV="${SEPRSO_VENV:-$HOME/venvs/seprso}"
-OUT_ROOT="${SEPRSO_OUT:-$REPO/results}"
-PYTHON_MODULE="${SEPRSO_PYTHON_MODULE:-python/3.11}"
+ACCOUNT="${SEPSRO_ACCOUNT:-}"
+TIME="${SEPSRO_TIME:-24:00:00}"
+MEM="${SEPSRO_MEM:-16G}"
+CPUS="${SEPSRO_CPUS:-4}"
+GPUS="${SEPSRO_GPUS:-0}"
+GPU_TYPE="${SEPSRO_GPU_TYPE:-}"
+VENV="${SEPSRO_VENV:-$HOME/venvs/sepsro}"
+OUT_ROOT="${SEPSRO_OUT:-$REPO/results}"
+PYTHON_MODULE="${SEPSRO_PYTHON_MODULE:-python/3.11}"
 DRY_RUN=0
 
 METHODS=()
@@ -80,7 +80,7 @@ done
 [[ ${#METHODS[@]} -eq 0 ]] && METHODS=(random)
 
 if [[ -z "$ACCOUNT" && $DRY_RUN -eq 0 ]]; then
-  echo "No --account given and \$SEPRSO_ACCOUNT is unset." >&2
+  echo "No --account given and \$SEPSRO_ACCOUNT is unset." >&2
   echo "Alliance clusters reject jobs without one, e.g. --account def-yourpi" >&2
   exit 1
 fi
@@ -107,7 +107,7 @@ import os, sys
 import warnings
 warnings.filterwarnings('ignore')
 from config import parse_env
-from seprso.envs import make_env
+from sepsro.envs import make_env
 
 env_name, out_root, exp, overwrite, tasks = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == '1', sys.argv[5:]
 preset = parse_env(env_name)

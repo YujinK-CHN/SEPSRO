@@ -1,4 +1,4 @@
-# SEPRSO
+# SEPSRO
 
 Multi-agent RL research on SESiL, over **PettingZoo** and **OpenSpiel**, with
 room for several methods (PSRO, PPO, GEMS, ...) compared under one budget and
@@ -18,7 +18,7 @@ Status:
 ## Installation (Linux / WSL)
 
 ```bash
-conda create -n seprso python=3.11 -y && conda activate seprso
+conda create -n sepsro python=3.11 -y && conda activate sepsro
 pip install torch --index-url https://download.pytorch.org/whl/cpu    # or a CUDA build
 pip install -r requirements.txt
 pytest -q
@@ -34,8 +34,8 @@ On a login node:
 
 ```bash
 cd ~/projects/def-yourpi && git clone https://github.com/YujinK-CHN/SEPRSO.git && cd SEPRSO
-bash setup_cluster.sh                 # venv at ~/venvs/seprso (python/3.11 module)
-source ~/venvs/seprso/bin/activate && AutoROM   # only for space_invaders; accept the ROM licence
+bash setup_cluster.sh                 # venv at ~/venvs/sepsro (python/3.11 module)
+source ~/venvs/sepsro/bin/activate && AutoROM   # only for space_invaders; accept the ROM licence
 bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
     --env space_invaders --budget 5000000 --seeds 0,1,2 --time 48:00:00
 ```
@@ -110,7 +110,7 @@ python main.py --method gems --env space_invaders --budget 100000000
 ```
 
 The `space_invaders` preset is `pettingzoo.atari.space_invaders_v2` (Parallel
-API, grey-scale) behind `AtariPreprocessing` (`seprso/envs/wrappers.py`):
+API, grey-scale) behind `AtariPreprocessing` (`sepsro/envs/wrappers.py`):
 4-frame skip with max-pooling of the last two frames, 84x84, 4-frame stack,
 uint8 observations of shape `[4, 84, 84]`. One env step = one decision = 4
 emulator frames, so `--budget` and `--max-episode-steps` count decisions. Two
@@ -157,14 +157,14 @@ defaults otherwise, 10 iterations, NashConv after each iteration (OpenSpiel
 | iteration | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | psro_v2_example | 0.586 | 0.395 | 0.374 | 0.364 | 0.335 | 0.343 | 0.331 | 0.323 | 0.324 | 0.317 |
-| SEPRSO | 0.570 | 0.289 | 0.390 | 0.370 | 0.365 | 0.341 | 0.316 | 0.326 | 0.328 | 0.311 |
+| SEPSRO | 0.570 | 0.289 | 0.390 | 0.370 | 0.365 | 0.341 | 0.316 | 0.326 | 0.328 | 0.311 |
 
 (The example's `nash` meta-solver could not be compared: its cvxpy LP returns
 no solution on the initial 1x1 game with current cvxpy.)
 
 ## GEMS
 
-`seprso/methods/gems.py`, after Algorithm 1 of the paper, in its per-player form
+`sepsro/methods/gems.py`, after Algorithm 1 of the paper, in its per-player form
 (App. F/H): every seat has its own generator, anchor set and meta-strategy.
 Each iteration: (1) Monte-Carlo value of every anchor against the other seats'
 mixtures, (2) one optimistic MWU step, (3) an EB-UCB bandit over mutated and
@@ -207,7 +207,7 @@ run.sh                    launcher over methods x seeds (local)
 setup_cluster.sh          one-time venv setup on an Alliance login node
 submit.sh                 Slurm job-array submission (one task per method x seed)
 plot_results.py           learning curves across arms and seeds (+ training diagnostics)
-seprso/
+sepsro/
   envs/
     base.py               MultiAgentEnv / EnvSpec / TimeStep -- the one interface
     openspiel_env.py      OpenSpiel adapter (sequential + simultaneous, chance resolved)
@@ -253,7 +253,7 @@ tests/test_plot.py        plot_results grouping, naming, seed aggregation, CLI
 - **Same evaluation for everyone.** Methods expose `policies()` (one `Policy`
   per seat); the `Evaluator` scores it at the same watermarks with the same
   metrics, so `eval.jsonl` files from different methods line up.
-- **Registries, not edits.** A new method is a file in `seprso/methods/` with
+- **Registries, not edits.** A new method is a file in `sepsro/methods/` with
   `@METHODS.register('name')`, imported in `methods/__init__.py`, plus its
   argument group in `config.py`. A new metric is `@METRICS.register('name')`.
 - **Environments by preset.** Add frequently used envs to `ENV_PRESETS`; try

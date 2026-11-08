@@ -1,12 +1,12 @@
 """
-Single configuration file for every method in SEPRSO.
+Single configuration file for every method in SEPSRO.
 
 Only a few things are meant to change from the command line, because only they
 change between runs of an experiment suite:
 
-    --method    which method       (see seprso/methods; `--help` lists them)
+    --method    which method       (see sepsro/methods; `--help` lists them)
     --env       which environment  (a key of ENV_PRESETS, or backend:id)
-    --budget    total training budget, in ENV STEPS (see seprso/budget.py)
+    --budget    total training budget, in ENV STEPS (see sepsro/budget.py)
     --seed      random seed
 
     python main.py --method random --env kuhn_poker --budget 100000 --seed 0
@@ -30,11 +30,11 @@ import argparse
 import json
 import os
 
-from seprso.meta_solvers import META_SOLVERS
-from seprso.registry import METHODS, METRICS
-import seprso.methods  # noqa: F401  (registers methods)
-import seprso.evaluation  # noqa: F401  (registers metrics)
-import seprso.exploitability  # noqa: F401  (registers nash_conv)
+from sepsro.meta_solvers import META_SOLVERS
+from sepsro.registry import METHODS, METRICS
+import sepsro.methods  # noqa: F401  (registers methods)
+import sepsro.evaluation  # noqa: F401  (registers metrics)
+import sepsro.exploitability  # noqa: F401  (registers nash_conv)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,7 +283,7 @@ def _add_gems_config(parser):
 
 def get_config():
     parser = argparse.ArgumentParser(
-        description='SEPRSO', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        description='SEPSRO', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     _add_run_config(parser)
     _add_env_config(parser)
     _add_eval_config(parser)

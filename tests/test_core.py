@@ -15,11 +15,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import ENV_PRESETS, parse_env  # noqa: E402
-from seprso.budget import BudgetTracker  # noqa: E402
-from seprso.envs import make_env  # noqa: E402
-from seprso.meta_game import PayoffTable, Population  # noqa: E402
-from seprso.policies import FixedActionPolicy, MixturePolicy, RandomPolicy  # noqa: E402
-from seprso.rollout import play_episode  # noqa: E402
+from sepsro.budget import BudgetTracker  # noqa: E402
+from sepsro.envs import make_env  # noqa: E402
+from sepsro.meta_game import PayoffTable, Population  # noqa: E402
+from sepsro.policies import FixedActionPolicy, MixturePolicy, RandomPolicy  # noqa: E402
+from sepsro.rollout import play_episode  # noqa: E402
 
 
 def _has(module):

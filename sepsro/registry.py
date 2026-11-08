@@ -5,7 +5,7 @@ A method is selected by --method and an evaluation metric by --eval-metrics.
 Registering by decorator means adding a new one is a new file plus one import
 in its package __init__, never an edit to main.py.
 
-    from seprso.registry import METHODS
+    from sepsro.registry import METHODS
 
     @METHODS.register('psro')
     class PSRO(Method):

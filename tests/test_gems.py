@@ -22,12 +22,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import parse_env  # noqa: E402
-from seprso.envs import make_env  # noqa: E402
+from sepsro.envs import make_env  # noqa: E402
 
 torch = pytest.importorskip('torch')
 
-from seprso.learners.generator import GeneratorPolicy, make_generator  # noqa: E402
-from seprso.methods.gems import eb_ucb, omwu_step, return_range  # noqa: E402
+from sepsro.learners.generator import GeneratorPolicy, make_generator  # noqa: E402
+from sepsro.methods.gems import eb_ucb, omwu_step, return_range  # noqa: E402
 
 HAS_OS = True
 try:

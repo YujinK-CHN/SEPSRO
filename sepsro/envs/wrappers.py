@@ -14,7 +14,7 @@ agent:
 
 Observations stay uint8 (0..255): a replay buffer of 84 x 84 x 4 frames costs a
 quarter of the memory in float32. Networks divide by 255 in their image encoder
-(seprso/learners/networks.py).
+(sepsro/learners/networks.py).
 
 Budget unit with this wrapper: one env.step() is one DECISION, i.e.
 `frame_skip` emulator frames.

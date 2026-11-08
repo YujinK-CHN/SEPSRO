@@ -3,7 +3,7 @@ GEMS -- Generative Evolutionary Meta-Solver (Sharma et al., TMLR 2026).
 
 Each seat p keeps (App. F / H, the per-player form of Algorithm 1):
     anchors   Z_p, latent codes z in R^d, initialised z ~ N(0, I)
-    generator G_p: z -> policy (seprso/learners/generator.py), plus a critic
+    generator G_p: z -> policy (sepsro/learners/generator.py), plus a critic
     sigma_p   meta-strategy over Z_p, initialised uniform
 
 One iteration (Algorithm 1):

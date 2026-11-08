@@ -20,12 +20,12 @@ import os
 import numpy as np
 
 from config import get_config, resolve, save_config
-from seprso.budget import BudgetTracker
-from seprso.envs import make_env
-from seprso.evaluation import Evaluator
-from seprso.logging import RunLogger
-from seprso.registry import METHODS
-from seprso.utils import set_seed
+from sepsro.budget import BudgetTracker
+from sepsro.envs import make_env
+from sepsro.evaluation import Evaluator
+from sepsro.logging import RunLogger
+from sepsro.registry import METHODS
+from sepsro.utils import set_seed
 
 
 LOG_FILES = ('eval.jsonl', 'train.jsonl')
@@ -76,7 +76,7 @@ def main(argv=None):
     method = method_cls(args=args, env_fn=env_fn, spec=spec, budget=budget, logger=logger,
                         evaluator=evaluator, rng=np.random.default_rng([args.seed, 0]))
     logger.meta.update(method.variant())
-    print(f'[seprso] {args.method} on {args.env_name} ({spec.backend}, '
+    print(f'[sepsro] {args.method} on {args.env_name} ({spec.backend}, '
           f'{spec.num_agents} agents, {"turn-based" if spec.turn_based else "simultaneous"}) '
           f'budget={args.budget} seed={args.seed} -> {args.run_dir}', flush=True)
 

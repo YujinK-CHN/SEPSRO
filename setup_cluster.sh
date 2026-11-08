@@ -3,7 +3,7 @@
 # One-time environment setup on a Digital Research Alliance cluster.
 # Run on a LOGIN node (it needs internet), from the repository root:
 #
-#   bash setup_cluster.sh                     # venv at ~/venvs/seprso
+#   bash setup_cluster.sh                     # venv at ~/venvs/sepsro
 #   bash setup_cluster.sh --venv ~/venvs/x    # elsewhere
 #   bash setup_cluster.sh --no-atari          # skip the Atari / Space Invaders packages
 #
@@ -23,8 +23,8 @@
 # by this script on the login node.
 set -euo pipefail
 
-VENV="${SEPRSO_VENV:-$HOME/venvs/seprso}"
-PYTHON_MODULE="${SEPRSO_PYTHON_MODULE:-python/3.11}"
+VENV="${SEPSRO_VENV:-$HOME/venvs/sepsro}"
+PYTHON_MODULE="${SEPSRO_PYTHON_MODULE:-python/3.11}"
 ATARI=1
 
 while [[ $# -gt 0 ]]; do
@@ -115,7 +115,7 @@ install() {
   done
 }
 
-# torch: the wheelhouse build matches the cluster's CUDA; nothing in SEPRSO
+# torch: the wheelhouse build matches the cluster's CUDA; nothing in SEPSRO
 # needs a GPU yet, but the same wheel works on CPU nodes.
 install torch numpy scipy matplotlib pytest
 install gymnasium pygame "pettingzoo>=1.24" open_spiel
@@ -130,7 +130,7 @@ for name in ('torch', 'numpy', 'scipy', 'matplotlib', 'gymnasium', 'pettingzoo',
     module = importlib.import_module(name)
     print(f'  {name:12s} {getattr(module, "__version__", "ok")}')
 PYEOF
-python -c "import config, main" && echo "[setup] SEPRSO imports fine"
+python -c "import config, main" && echo "[setup] SEPSRO imports fine"
 
 cat <<EOF
 

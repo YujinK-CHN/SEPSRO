@@ -1,5 +1,5 @@
 """
-Importing this package registers every method in seprso.registry.METHODS.
+Importing this package registers every method in sepsro.registry.METHODS.
 
 To add a method: create <name>.py here with a class decorated
 @METHODS.register('<name>'), import it below, and add its argument group to

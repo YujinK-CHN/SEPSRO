@@ -14,14 +14,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import parse_env  # noqa: E402
-from seprso.envs import make_env  # noqa: E402
-from seprso.envs.base import EnvSpec, MultiAgentEnv, TimeStep  # noqa: E402
-from seprso.policies import RandomPolicy  # noqa: E402
-from seprso.rollout import play_episode  # noqa: E402
+from sepsro.envs import make_env  # noqa: E402
+from sepsro.envs.base import EnvSpec, MultiAgentEnv, TimeStep  # noqa: E402
+from sepsro.policies import RandomPolicy  # noqa: E402
+from sepsro.rollout import play_episode  # noqa: E402
 
 torch = pytest.importorskip('torch')
 
-from seprso.envs.wrappers import AtariPreprocessing  # noqa: E402
+from sepsro.envs.wrappers import AtariPreprocessing  # noqa: E402
 
 
 class FakeAtari(MultiAgentEnv):
@@ -84,7 +84,7 @@ def _image_episode(learner_policy, agents):
 
 @pytest.mark.parametrize('kind', ['pg', 'dqn'])
 def test_rl_learners_train_on_images(kind):
-    from seprso.oracles import make_learner_factory
+    from sepsro.oracles import make_learner_factory
     from config import get_config, resolve
     args = resolve(get_config().parse_args(['--env', 'rps', '--pg-hidden', '16',
                                             '--dqn-hidden', '16', '--dqn-batch-size', '4',
