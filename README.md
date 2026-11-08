@@ -33,7 +33,7 @@ everything inside WSL.
 On a login node:
 
 ```bash
-cd ~/projects/def-yourpi && git clone https://github.com/YujinK-CHN/SEPRSO.git && cd SEPRSO
+cd ~/projects/def-yourpi && git clone https://github.com/YujinK-CHN/SEPSRO.git && cd SEPSRO
 bash setup_cluster.sh                 # venv at ~/venvs/sepsro (python/3.11 module)
 source ~/venvs/sepsro/bin/activate && AutoROM   # only for space_invaders; accept the ROM licence
 bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
