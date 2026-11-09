@@ -333,6 +333,15 @@ def _add_gems_config(parser):
     group.add_argument('--gems-gamma', type=float, default=0.99, help='GAE gamma. Not in paper.')
     group.add_argument('--gems-gae-lambda', type=float, default=0.95,
                        help='GAE lambda. Not in paper.')
+    # The paper trains ABR-TR with "PPO with GAE" but gives no PPO settings:
+    # each K_ABR step collects one batch and runs these epochs of clipped
+    # minibatch updates on it (1 epoch, 1 minibatch, clip 0 = one plain PG step).
+    group.add_argument('--gems-abr-epochs', type=int, default=4,
+                       help='PPO epochs per ABR-TR batch. Not in paper.')
+    group.add_argument('--gems-abr-minibatches', type=int, default=4,
+                       help='PPO minibatches per epoch. Not in paper.')
+    group.add_argument('--gems-abr-clip', type=float, default=0.2,
+                       help='PPO ratio clip; 0 = unclipped. Not in paper.')
 
 
 def _add_exploit_config(parser):

@@ -9,6 +9,7 @@ GEMS pieces, checked against known answers, plus end-to-end runs.
                       code's policy is a deterministic function of it; the
                       hypernetwork's once-per-code batch path equals the
                       per-row one, in values and in gradients
+    ABR-TR            the PPO update finds the best response to a fixed player
     GEMS              runs on native, PettingZoo (AEC + Parallel) and OpenSpiel
                       envs; anchors grow and are capped
 """
@@ -165,3 +166,41 @@ def test_gems_runs_on_pettingzoo(tmp_path, generator):
 def test_gems_runs_on_openspiel(tmp_path):
     _, evals = _run(tmp_path, 'kuhn_poker', '--eval-metrics', 'nash_conv')
     assert all(0 <= e['nash_conv'] < 5 for e in evals)
+
+
+
+def _abr_on_rps(extra):
+    """ABR-TR alone, one anchor, against a player that always plays rock."""
+    from config import parse_args
+    from sepsro.budget import BudgetTracker
+    from sepsro.methods.gems import GEMS
+    from sepsro.policies import FixedActionPolicy
+    args = parse_args(['--method', 'gems', '--env', 'rps', '--gems-abr-steps', '10',
+                       '--gems-abr-batch-anchors', '16', '--gems-abr-lr', '1e-2', *extra])
+    env = make_env(args.env_preset)
+    torch.manual_seed(0)
+    gems = GEMS(args=args, env_fn=lambda: make_env(args.env_preset), spec=env.spec,
+                budget=BudgetTracker(10 ** 9), logger=None, evaluator=None,
+                rng=np.random.default_rng(0))
+    gems.env = env
+    gems.range = return_range(env, np.random.default_rng(1))
+    seat, other = env.spec.agents
+    gems._opponents = lambda p: {other: FixedActionPolicy(0)}
+    z = gems.anchors[seat][0]
+    gems.anchors[seat] = z[None]
+    stats = gems._abr_tr(seat, z)
+    step = env.reset(3)
+    probs = GeneratorPolicy(gems.gen[seat], z, args.gems_temperature).action_probs(
+        step.observations[seat], step.legal_masks[seat])
+    return stats, float(probs[1])
+
+
+@pytest.mark.parametrize('extra, updates', [
+    ([], 16),                                                    # PPO: 4 epochs x 4 minibatches
+    (['--gems-abr-epochs', '1', '--gems-abr-minibatches', '1', '--gems-abr-clip', '0'], 1),
+])
+def test_abr_tr_ppo_update(extra, updates):
+    stats, paper = _abr_on_rps(extra)
+    assert stats['updates'] == updates and 0 <= stats['clip_frac'] <= 1
+    if updates > 1:   # 10 PPO batches find the best response to rock (paper)
+        assert paper > 0.6, paper

@@ -208,6 +208,7 @@ Where the paper is silent or ambiguous, the choice made here:
 |---|---|---|
 | Generator | "hypernetwork", "standard MLP" | MLP z -> weights of a 1-hidden-layer (64, tanh) policy (`--gems-generator hyper`); `conditional` = MLP([obs, z]) |
 | Critic for GAE | not described | V(obs, z) MLP, lr 1e-3, gamma 0.99, lambda 0.95 |
+| ABR-TR optimiser | "PPO with GAE", no settings | each of the K_ABR steps: one fresh batch, 4 epochs x 4 minibatches of the clipped surrogate (clip 0.2) + beta_KL x KL to the generator at the start of the phase (`--gems-abr-epochs/-minibatches/-clip`; `1 1 0` = one plain PG step) |
 | Reward scale | assumed in [0, 1] | normalised per seat: OpenSpiel min/max utility, matrix payoff range, else range seen in random play |
 | Mixture value r_hat | B=128 joint samples | sigma . v_hat (same in expectation; a constant OMWU's normalisation removes) |
 | New anchor's mass | not stated | 1/(k+1) (OMWU cannot grow a zero) |
@@ -216,7 +217,7 @@ Where the paper is silent or ambiguous, the choice made here:
 | lambda_J (Jacobian) | not in Table 3 | 0 (implemented, off) |
 | n > 2 players | importance-weighted shared batch | per-anchor estimates for every seat (also unbiased) |
 
-**Kuhn poker, paper defaults, one seed** (NashConv; the paper reports
+**Kuhn poker, paper defaults, one seed, before the PPO update** (with one plain PG step per batch; NashConv; the paper reports
 exploitability ~0.18 at iteration 40, which may be NashConv / 2):
 0.895 at start, best 0.332, 0.484 after 40 iterations (exploitability 0.24),
 347k env steps. Training anchor codes only on the new code (`--gems-new-fraction 1`)

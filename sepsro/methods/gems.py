@@ -17,10 +17,13 @@ One iteration (Algorithm 1):
      N_oracle x M_oracle episodes against sigma_{-p}; the one with the highest
         mean + sqrt(2 var ln(3/delta_t) / n) + 3 ln(3/delta_t) / (n - 1) - lambda_J ||J G(z)||^2
      joins Z_p (delta_t = delta_0 / t^2).
-  4. Amortized best response with trust region (ABR-TR). K_ABR gradient steps
-     on G_p, each on fresh episodes of a batch of anchors against sigma_{-p}:
-        maximise  A_hat * log pi - beta_KL * KL(pi_theta || pi_theta_old) - lambda_J ||J G(z)||^2
-     with GAE advantages from the critic (the paper uses "PPO with GAE").
+  4. Amortized best response with trust region (ABR-TR). K_ABR steps on G_p,
+     each on fresh episodes of a batch of anchors against sigma_{-p}, trained
+     with PPO ("PPO with GAE" in the paper): several epochs of minibatch
+     updates of the clipped surrogate plus the trust region,
+        maximise  clip-surrogate(A_hat) - beta_KL * KL(pi_theta || pi_theta_old) - lambda_J ||J G(z)||^2
+     with GAE advantages from the critic; pi_theta_old is G_p at the start of
+     the phase.
 
 Defaults are the paper's Kuhn-poker reference settings (App. Table 3).
 
@@ -39,8 +42,9 @@ Decisions the paper leaves open, made here and listed in the README:
     that a training anchor in ABR-TR is the newly added code;
   * at the anchor cap (k_max = 32) the anchor with the least meta mass
     ('least_mass', or lowest value with 'worst_ev') is replaced;
-  * the generator architecture, critic, GAE gamma / lambda and critic learning
-    rate are not given in the paper; see config.py for the values used.
+  * the generator architecture, critic, GAE gamma / lambda, critic learning
+    rate and the PPO epochs / minibatches / clip are not given in the paper;
+    see config.py for the values used.
 For more than two players the per-anchor estimate of step 1 is used for every
 seat (unbiased, like the paper's importance-weighted shared-batch estimator,
 with lower variance and more episodes).
@@ -340,32 +344,61 @@ class GEMS(Method):
             returns.append(adv + values)
 
         obs, zs, masks, actions = (torch.cat(x) for x in (obs, zs, masks, actions))
-        adv = torch.as_tensor(np.concatenate(advantages), dtype=torch.float32)
-        ret = torch.as_tensor(np.concatenate(returns), dtype=torch.float32)
-        if len(adv) > 1:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        adv_all = torch.as_tensor(np.concatenate(advantages), dtype=torch.float32)
+        ret_all = torch.as_tensor(np.concatenate(returns), dtype=torch.float32)
+        if len(adv_all) > 1:
+            adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
 
         tau = a.gems_temperature
-        logp = F.log_softmax(masked_logits(gen(obs, zs), masks, tau), -1)
         with torch.no_grad():
-            old_logp = F.log_softmax(masked_logits(old(obs, zs), masks, tau), -1)
-        probs = logp.exp()
-        kl = (probs * torch.where(masks, logp - old_logp, torch.zeros_like(logp))).sum(-1).mean()
-        pg = -(adv * logp.gather(1, actions[:, None]).squeeze(1)).mean()
-        loss = pg + a.gems_kl_coef * kl
-        if a.gems_jacobian_coef > 0:
-            unique = torch.as_tensor(np.unique(zs.numpy(), axis=0))
-            loss = loss + a.gems_jacobian_coef * jacobian_penalty(gen, unique)
+            # Behaviour policy: the generator that collected the batch (PPO ratio),
+            # and the generator at the start of this ABR-TR phase (trust region).
+            behaviour = F.log_softmax(masked_logits(gen(obs, zs), masks, tau), -1)
+            behaviour = behaviour.gather(1, actions[:, None]).squeeze(1)
+            anchor_logp = F.log_softmax(masked_logits(old(obs, zs), masks, tau), -1)
 
-        self.gen_opt[p].zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(gen.parameters(), a.gems_grad_clip)
-        self.gen_opt[p].step()
+        n = len(adv_all)
+        size = max(1, -(-n // max(1, a.gems_abr_minibatches)))
+        clip = a.gems_abr_clip
+        totals = {'pg_loss': 0.0, 'kl': 0.0, 'v_loss': 0.0, 'clip_frac': 0.0}
+        updates = 0
+        for _ in range(max(1, a.gems_abr_epochs)):
+            order = torch.as_tensor(self.rng.permutation(n))
+            for start in range(0, n, size):
+                idx = order[start:start + size]
+                o, z, m, act = obs[idx], zs[idx], masks[idx], actions[idx]
+                adv, ret = adv_all[idx], ret_all[idx]
+                logp = F.log_softmax(masked_logits(gen(o, z), m, tau), -1)
+                probs = logp.exp()
+                kl = (probs * torch.where(m, logp - anchor_logp[idx],
+                                          torch.zeros_like(logp))).sum(-1).mean()
+                ratio = (logp.gather(1, act[:, None]).squeeze(1) - behaviour[idx]).exp()
+                if clip > 0:
+                    pg = -torch.min(ratio * adv, ratio.clamp(1 - clip, 1 + clip) * adv).mean()
+                    clip_frac = ((ratio - 1).abs() > clip).float().mean().item()
+                else:
+                    pg = -(ratio * adv).mean()
+                    clip_frac = 0.0
+                loss = pg + a.gems_kl_coef * kl
+                if a.gems_jacobian_coef > 0:
+                    unique = torch.as_tensor(np.unique(z.numpy(), axis=0))
+                    loss = loss + a.gems_jacobian_coef * jacobian_penalty(gen, unique)
 
-        v_loss = (critic(obs, zs) - ret).pow(2).mean()
-        self.critic_opt[p].zero_grad()
-        v_loss.backward()
-        torch.nn.utils.clip_grad_norm_(critic.parameters(), a.gems_grad_clip)
-        self.critic_opt[p].step()
-        return {'pg_loss': pg.item(), 'kl': kl.item(), 'v_loss': v_loss.item(),
-                'transitions': len(adv)}
+                self.gen_opt[p].zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(gen.parameters(), a.gems_grad_clip)
+                self.gen_opt[p].step()
+
+                v_loss = (critic(o, z) - ret).pow(2).mean()
+                self.critic_opt[p].zero_grad()
+                v_loss.backward()
+                torch.nn.utils.clip_grad_norm_(critic.parameters(), a.gems_grad_clip)
+                self.critic_opt[p].step()
+
+                for key, value in (('pg_loss', pg.item()), ('kl', kl.item()),
+                                   ('v_loss', v_loss.item()), ('clip_frac', clip_frac)):
+                    totals[key] += value
+                updates += 1
+        stats = {k: v / updates for k, v in totals.items()}
+        stats.update(transitions=n, updates=updates)
+        return stats
