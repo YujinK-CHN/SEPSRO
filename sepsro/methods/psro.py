@@ -27,10 +27,13 @@ response starts from scratch. That is the default here (--psro-br-init
 scratch). --psro-br-init copy restores the copy-plus-noise behaviour of the
 older TensorFlow learners (noise scale --psro-sigma).
 
-Stops after --psro-iterations iterations (psro_v2_example's gpsro_iterations)
-or when the env-step budget runs out, whichever is first. An iteration that has
-started is completed, so the budget can be overshot by one payoff-table update;
-the final eval record logs the true budget_used.
+Stops when the env-step budget is spent -- exactly then, mid-iteration if
+need be (main.py's tracker is hard) -- or after --psro-iterations iterations
+if that optional cap (psro_v2_example: gpsro_iterations=100) is set. What is
+evaluated at any moment is the output of the last COMPLETED iteration: the
+meta-strategy mixture over the populations as of the last solve. A response
+still in training, or a population member whose payoff entries are not yet
+simulated, is not part of it.
 """
 
 from __future__ import annotations
@@ -71,14 +74,15 @@ class PSRO(Method):
                                    number_training_episodes=a.psro_number_training_episodes,
                                    self_play_proportion=a.psro_self_play_proportion,
                                    sigma=a.psro_sigma, seed=a.seed)
-        self.meta = None
+        self.meta = {agent: np.ones(1) for agent in self.agents}   # the random policy
         self.iteration = 0
+        self._commit()
 
     # -------------------------------------------------------------- loop
     def train(self):
         self._update_meta_game()
-        while not self.budget.exhausted and self.iteration < self.args.psro_iterations:
-            self.evaluator.maybe_evaluate(self)
+        cap = self.args.psro_iterations
+        while not self.budget.exhausted and (cap is None or self.iteration < cap):
             self.iteration += 1
 
             mixtures = {agent: MixturePolicy(self.populations[agent].policies, self.meta[agent])
@@ -99,8 +103,7 @@ class PSRO(Method):
         self.env.close()
 
     def policies(self):
-        return {agent: MixturePolicy(self.populations[agent].policies, self.meta[agent])
-                for agent in self.agents}
+        return self._output
 
     def variant(self):
         a = self.args
@@ -117,6 +120,7 @@ class PSRO(Method):
         distributions = self.solver(payoffs, iterations=a.psro_prd_iterations,
                                     dt=a.psro_prd_dt, gamma=a.psro_prd_gamma)
         self.meta = dict(zip(self.agents, distributions))
+        self._commit()
 
         record = {'iteration': self.iteration, 'budget_used': self.budget.used,
                   'new_entries': new_entries,
@@ -125,6 +129,12 @@ class PSRO(Method):
         if int(np.prod(payoffs.shape[:-1])) <= _LOG_PAYOFFS_MAX_ENTRIES:
             record['payoffs'] = payoffs
         self.logger.train('psro_iteration', record)
+
+    def _commit(self):
+        """Freeze the current output: what policies() returns until the next solve."""
+        self._output = {agent: MixturePolicy(list(self.populations[agent].policies),
+                                             self.meta[agent])
+                        for agent in self.agents}
 
     def _select_start_policies(self):
         """psro_v2's training_strategy_selector, with number_policies_selected = 1."""

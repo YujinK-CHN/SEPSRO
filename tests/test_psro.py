@@ -138,7 +138,7 @@ def test_psro_rps_end_to_end(tmp_path):
                '--psro-iterations', '6', '--psro-number-training-episodes', '1500',
                '--psro-sims-per-entry', '100', '--pg-hidden', '32', '32', '--pg-pi-lr', '1e-2',
                '--psro-prd-iterations', '2000', '--eval-metrics', 'nash_conv',
-               '--eval-interval', '1', '--results-dir', str(tmp_path)])
+               '--eval-interval', '500', '--results-dir', str(tmp_path)])
     run_dir = tmp_path / 'check' / 'rps' / 'psro' / 'seed0'
     train = [json.loads(line) for line in (run_dir / 'train.jsonl').read_text().splitlines()]
     iterations = [r for r in train if r['kind'] == 'psro_iteration']
@@ -171,8 +171,9 @@ def test_psro_budget_is_charged(tmp_path):
                '--eval-episodes', '10', '--results-dir', str(tmp_path)])
     run_dir = tmp_path / 'check' / 'rps' / 'psro' / 'seed0'
     final = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()][-1]
-    # The oracle stopped on the budget, long before its episode threshold.
-    assert 3000 <= final['budget_used'] < 3500
+    # The oracle stopped on the budget, long before its episode threshold, and
+    # the hard stop leaves no overshoot.
+    assert final['budget_used'] == 3000
 
 
 def test_prd_matches_openspiel_projection():
@@ -228,7 +229,7 @@ def test_psro_kuhn_exact_br(tmp_path):
     import main
     main.main(['--method', 'psro', '--env', 'kuhn_poker', '--budget', '10000000',
                '--psro-oracle', 'br', '--psro-iterations', '8', '--psro-sims-per-entry', '300',
-               '--eval-metrics', 'nash_conv', '--eval-interval', '1',
+               '--eval-metrics', 'nash_conv', '--eval-interval', '2000',
                '--results-dir', str(tmp_path)])
     run_dir = tmp_path / 'check' / 'kuhn_poker' / 'psro' / 'seed0'
     nash_convs = [json.loads(line)['nash_conv']

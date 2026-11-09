@@ -49,6 +49,10 @@ env once on the login node and refuses run directories that already hold logs
 (unless `--overwrite`). `--dry-run` writes and prints the job script only. Job
 scripts go to `<out-root>/jobs/`, Slurm logs to `<out-root>/logs/`.
 
+`--task exploit` runs the approximate NashConv on finished runs (one task per
+method and seed), `--task crossplay` the cross-play matrix over every finished
+run of the experiment (one task); see [Experiment protocol](#experiment-protocol).
+
 ## How to run
 
 ```bash
@@ -61,9 +65,13 @@ python main.py --method psro --env kuhn_poker --psro-oracle dqn --budget 1000000
 
 bash run.sh --method psro --env leduc_poker --budget 100000000 --seeds 0,1,2
 
-# GEMS with the paper's defaults (40 iterations)
+# GEMS with the paper's defaults (no iteration cap: it runs until the budget is spent)
 python main.py --method gems --env kuhn_poker --budget 100000000 --eval-metrics nash_conv
 python main.py --method gems --env connect_four --budget 100000000
+
+# post-hoc metrics on finished runs
+python posthoc.py exploit results/main/space_invaders/gems/seed0
+python posthoc.py crossplay results/main/space_invaders
 ```
 
 `--eval-metrics nash_conv` gives exact NashConv on OpenSpiel turn-based games
@@ -71,10 +79,18 @@ and on the native matrix games. PettingZoo games have no exact equivalent; use
 `vs_random` / `self_play` there.
 
 Output goes to `results/<exp-name>/<env>/<method>/seed<seed>/`:
-`config.json`, `eval.jsonl` (one record per evaluation watermark, same schema
-for every method) and `train.jsonl` (method internals: `psro_iteration` /
-`oracle_episode` records, `gems_iteration` records with meta-strategies,
-values, oracle picks and ABR losses).
+`config.json` (every setting, including the per-env overrides applied),
+`eval.jsonl` (one record before training, one every `--eval-interval` env
+steps, one at the end; same schema for every method), `train.jsonl` (method
+internals: `psro_iteration` / `oracle_episode` records, `gems_iteration`
+records with meta-strategies, values, oracle picks and ABR losses), and
+`final_policies.pkl` (the final joint policy, for `posthoc.py`). The post-hoc
+tools add `exploit.json` to a run and `crossplay.json` to the env directory.
+
+The budget is a hard stop: training ends at exactly `--budget` env steps,
+mid-iteration if need be, and every evaluation scores the method's last
+*committed* output (PSRO: the meta-strategy after the last solve; GEMS: the
+anchors, sigma and generator after the last completed iteration).
 
 Every eval record carries `method`, `env`, `seed`, `budget` and the method's
 variant (PSRO: `oracle`, `meta_solver`, `pg_loss`; GEMS: `generator`), so arms
@@ -131,9 +147,10 @@ halves both the time and the memory of a GEMS ABR-TR update.
 
 Measured cost (WSL, CPU, 8 threads): random play ~380 decisions and 0.6 s per
 episode; CNN policies ~450-500 decisions and 1.1-1.2 s per episode; a PG
-update ~0.25 s per episode. At the default settings that is ~6 h per PSRO-PG
-iteration (20,000 training episodes) plus ~20 min per new payoff entry, and
-~1 h per GEMS iteration (~40 h for its 40 iterations).
+update ~0.25 s per episode. Measured on fir (4 CPUs per task, 5M-step test
+run with the Kuhn defaults, before sticky actions and the generator change):
+GEMS ~1.3M env steps per hour and ~9.4 GB peak memory, PSRO-PG ~1.4-2.1M
+steps per hour and ~4.8 GB.
 
 ## PSRO and psro_v2
 
@@ -152,7 +169,7 @@ Where this differs from psro_v2, on purpose:
 | Default meta-solver | `alpharank` | `auto` (Nash LP for 2-player zero-sum, else PRD) | alpharank not ported yet |
 | Default oracle | `BR` | `pg` | BR exists only for OpenSpiel; `pg` runs everywhere |
 | PG policy loss | softmax over all actions | illegal actions masked | untrained Q of illegal actions otherwise pulls probability to them |
-| Stopping | iterations | iterations **or** env-step budget | the budget is the cross-method currency |
+| Stopping | 100 iterations | the env-step budget only, exactly (`--psro-iterations` is an optional cap) | the budget is the cross-method currency |
 
 Not ported yet: alpharank, `rm` / `uniform_biased` meta-solvers, rectified
 training, symmetric-game mode, `number_policies_selected > 1`.
@@ -178,7 +195,9 @@ mixtures, (2) one optimistic MWU step, (3) an EB-UCB bandit over mutated and
 random latent codes adds one anchor, (4) ABR-TR fine-tunes the generator
 (policy gradient with GAE plus a KL trust region). No payoff table is kept.
 
-Defaults are the paper's Kuhn reference settings (App. Table 3): T=40, k0=1,
+Defaults are the paper's Kuhn reference settings (App. Table 3), except that
+T=40 is not imposed (`--gems-iterations` is an optional cap; the budget stops
+it, as for every method): k0=1,
 k_max=32, d_z=8, tau=1; N_MC=8 x M_MC=2; OMWU eta=0.03 const, logit cap 50;
 N_oracle=8 x M_oracle=2, 32 mutated (std 0.2) + 32 random candidates, delta_0=0.5;
 K_ABR=30 steps of 16 anchors, lr 2e-4, beta_KL=0.05, q_new=0.25, grad clip 0.5.
@@ -205,11 +224,78 @@ ended at 0.388. On rock-paper-scissors GEMS drifts away from the uniform Nash it
 starts near: ABR-TR pushes all anchors of the shared generator towards the same
 best response faster than the KL term holds them.
 
+## Experiment protocol
+
+The paper compares PSRO and GEMS as baselines on three environments: Kuhn and
+Leduc poker (the standard benchmarks, exact NashConv) and two-player Space
+Invaders (the harder one). 5 seeds (0-4) per method and environment; each run
+is a single Slurm job.
+
+**Fairness rules**, enforced by the code:
+
+1. *Equal experience.* Every method trains for exactly `--budget` env steps,
+   payoff-table simulation included; the hard stop means nobody finishes an
+   iteration on extra steps.
+2. *Equal measurement.* Every method is evaluated at the same env-step counts
+   (0, every `--eval-interval`, the budget), on its last committed output,
+   with the same metrics, episodes and evaluation RNG stream.
+3. *No iteration caps.* The budget is the only stopping rule (psro_v2's 100
+   iterations and GEMS's T=40 would stop either method at a different amount
+   of experience).
+4. *Published settings where they exist.* Kuhn and Leduc use psro_v2_example's
+   and the GEMS paper's settings unchanged. Space Invaders changes only the
+   settings listed in `config.ENV_OVERRIDES` (below), applied to both methods
+   in the same way, with the same tuning effort for each.
+5. *Same network torso.* Both methods use the Nature-DQN CNN on image
+   observations.
+
+**Metrics**
+
+| | Kuhn, Leduc | Space Invaders |
+|---|---|---|
+| headline | exact NashConv (`--eval-metrics nash_conv`), the full curve | approximate NashConv at the end (`posthoc.py exploit`) |
+| secondary | -- | cross-play (`posthoc.py crossplay`) |
+| learning curves | NashConv | `vs_random`, `self_play` |
+
+Space Invaders is general-sum and partly competitive (the players compete for
+the same invaders; in the test run one trained player's score fell while the
+other's rose), so there is no winner and raw score in self-play says little
+about equilibrium play. *Approximate NashConv* is the same quantity as the
+poker headline: for each seat a fresh PPO learner (config groups `exploit`
+and `ppo`; 5M steps per seat, Atari PPO clip 0.1) trains a best response to
+the run's final policy of the other seat, and the gains in return over the
+final policy are summed. It is a lower bound (an RL best response can be
+weaker than the exact one) and is only comparable because every run gets the
+identical protocol; on Kuhn and Leduc `exploit.json` also holds the exact
+value, which checks the protocol. *Cross-play* pairs every run's seat-0 policy
+with every other run's seat-1 policy (all methods and seeds) and reports each
+run's mean return against co-players it never trained with.
+
+**Space Invaders settings** (`config.ENV_OVERRIDES['space_invaders']`;
+starting points for the pilot, every other setting is the published default)
+
+| setting | default | Space Invaders | why |
+|---|---|---|---|
+| `--budget` | -- | 30M env steps (120M frames) | ~15-23 h per run on fir, inside one 36 h job |
+| `--eval-episodes` | 200 | 100 | 20 evaluation points x 3 metrics stay ~1.5 h of a run |
+| `--psro-number-training-episodes` | 10,000 | 3,000 | episodes are ~150x longer than Kuhn's; ~2.7M steps per response pair -> ~9 iterations |
+| `--psro-sims-per-entry` | 1,000 | 50 | payoff simulation costs (2n+1) x sims episodes at iteration n |
+| `--gems-mutation-pool` / `--gems-random-pool` | 32 / 32 | 8 / 8 | the same 1,024 oracle episodes per seat, spent on 16 candidates x 64 episodes instead of 64 x 16, so the pick is not noise |
+| `--gems-oracle-opponents` x `--gems-oracle-rollouts` | 8 x 2 | 16 x 4 | (same) |
+| `--gems-eta` | 0.03 | 0.5 | with ~20 iterations and value gaps of ~0.05, 0.03 left sigma uniform in the test run |
+| `--gems-abr-lr` | 2e-4 | 1e-3 | the test run's ABR-TR moved the policy by KL ~1e-4 per iteration |
+
+**Pilot (equal tuning effort).** Before the main runs: per method, the same
+number of short runs (1 seed, outside 0-4) varying only the settings above,
+judged by approximate NashConv; the chosen values replace the starting points
+in `ENV_OVERRIDES`, and everything tried is listed here.
+
 ## Layout
 
 ```
 config.py                 single source of truth: ENV_PRESETS + every hyper-parameter
 main.py                   single entry point; builds shared pieces, runs --method
+posthoc.py                approximate NashConv (PPO best responses) and cross-play on finished runs
 run.sh                    launcher over methods x seeds (local)
 setup_cluster.sh          one-time venv setup on an Alliance login node
 submit.sh                 Slurm job-array submission (one task per method x seed)
@@ -248,6 +334,7 @@ tests/test_psro.py        meta-solvers, oracles, PSRO, NashConv (closed-form che
 tests/test_gems.py        OMWU, EB-UCB, generator, GEMS end to end
 tests/test_images.py      Atari wrapper, CNN learners, Space Invaders preset (if ROMs)
 tests/test_plot.py        plot_results grouping, naming, seed aggregation, CLI
+tests/test_protocol.py    hard budget, evaluation points, overrides, saved policies, post-hoc metrics
 ```
 
 ## Design rules
@@ -255,11 +342,13 @@ tests/test_plot.py        plot_results grouping, naming, seed aggregation, CLI
 - **One env interface.** Every step takes `{agent: action}`; every `TimeStep`
   says which agents act next (`acting`). Turn-based and simultaneous games are
   the same loop. Rewards are reported for *all* agents on every transition.
-- **Budget = env steps.** Every training step a method takes is charged,
-  including payoff-table simulation. Evaluation is not charged.
+- **Budget = env steps, hard stop.** Every training step a method takes is
+  charged, including payoff-table simulation, and training stops at exactly
+  the budget. Evaluation is not charged.
 - **Same evaluation for everyone.** Methods expose `policies()` (one `Policy`
-  per seat); the `Evaluator` scores it at the same watermarks with the same
-  metrics, so `eval.jsonl` files from different methods line up.
+  per seat, their last committed output); the `Evaluator` scores it at the
+  same env-step counts with the same metrics, so `eval.jsonl` files from
+  different methods line up.
 - **Registries, not edits.** A new method is a file in `sepsro/methods/` with
   `@METHODS.register('name')`, imported in `methods/__init__.py`, plus its
   argument group in `config.py`. A new metric is `@METRICS.register('name')`.

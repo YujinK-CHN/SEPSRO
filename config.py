@@ -12,9 +12,11 @@ change between runs of an experiment suite:
     python main.py --method random --env kuhn_poker --budget 100000 --seed 0
 
 Everything else -- evaluation protocol, every method's hyper-parameters -- is
-set by the defaults below. Edit them here. They are still CLI flags so a one-off
-sweep can override one without editing the file, but run.sh does not pass them,
-so this file stays the single source of truth.
+set by the defaults below, adjusted per environment by ENV_OVERRIDES. Edit them
+here. They are still CLI flags so a one-off sweep can override one without
+editing the file (a flag given explicitly always wins over ENV_OVERRIDES), but
+run.sh / submit.sh do not pass them, so this file stays the single source of
+truth.
 
 Groups:
     run         the knobs above, plus where output goes
@@ -24,6 +26,7 @@ Groups:
     pg / dqn    the RL oracle's learners (psro_v2_example.py's settings)
     ppo         PPO learner, for the future self-play `ppo` method
     gems        GEMS (defaults from the paper's Kuhn-poker reference settings)
+    exploit     post-hoc approximate NashConv (posthoc.py), with a PPO best response
 """
 
 import argparse
@@ -98,6 +101,50 @@ def parse_env(value):
     return preset
 
 
+# --------------------------------------------------------------------------- #
+# Per-environment settings.  Keyed like ENV_PRESETS.
+#
+# The defaults below are each method's published settings for small games
+# (psro_v2_example.py for PSRO, the paper's Kuhn table for GEMS). Kuhn and Leduc
+# use them unchanged (only the post-hoc check's episode count differs). Space
+# Invaders episodes are ~150x longer, so a few settings that are counts of
+# EPISODES (or that assume such counts) are scaled
+# to fit a 30M-step budget; everything not listed keeps its default. Starting
+# points for the pilot; the README lists the reasoning for each.
+#
+# Applied by parse_args() to every setting NOT given explicitly on the command
+# line, and recorded in config.json under 'env_overrides'.
+# --------------------------------------------------------------------------- #
+ENV_OVERRIDES = {
+    # Poker: the methods' published settings. Only the post-hoc approximate
+    # NashConv (a check against the exact one there) needs more evaluation
+    # episodes: NashConv is ~0.01-0.3 while returns vary by ~1 per episode.
+    'kuhn_poker': {'exploit_eval_episodes': 20_000},
+    'leduc_poker': {'exploit_eval_episodes': 20_000},
+    'space_invaders': {
+        # evaluation: 20 points x 100 episodes per metric (~1.5 h of a ~20 h run)
+        'eval_episodes': 100,
+        # PSRO: ~2.7M steps per best response pair, ~50 x (2n+1) episodes of
+        # payoff simulation at iteration n -> ~9 iterations in 30M steps
+        'psro_number_training_episodes': 3000,
+        'psro_sims_per_entry': 50,
+        # GEMS: the Kuhn values barely move on Atari (si_main: ABR KL ~1e-4 per
+        # iteration, sigma stayed uniform). Same oracle episodes (1024 per seat)
+        # spent on 16 candidates x 64 instead of 64 x 16, so the choice is not
+        # noise; a step size suited to ~20 iterations; a faster ABR-TR.
+        'gems_mutation_pool': 8,
+        'gems_random_pool': 8,
+        'gems_oracle_opponents': 16,
+        'gems_oracle_rollouts': 4,
+        'gems_eta': 0.5,
+        'gems_abr_lr': 1e-3,
+        # approximate NashConv: PPO best response per seat, Atari PPO clip
+        'exploit_steps': 5_000_000,
+        'ppo_clip': 0.1,
+    },
+}
+
+
 def _add_run_config(parser):
     group = parser.add_argument_group('run')
     group.add_argument('--method', type=str, default='random', choices=METHODS.names())
@@ -143,8 +190,10 @@ def _add_psro_config(parser):
                        help="Best-response oracle (psro_v2's oracle_type): RL with policy "
                             "gradient or DQN, or exact best response (OpenSpiel only; the "
                             "example's default).")
-    group.add_argument('--psro-iterations', type=int, default=100,
-                       help='Maximum PSRO iterations (gpsro_iterations); the budget may stop it sooner.')
+    group.add_argument('--psro-iterations', type=int, default=None,
+                       help='Optional cap on PSRO iterations (psro_v2_example: gpsro_iterations=100). '
+                            'Default: none -- the env-step budget is the only stopping rule, so '
+                            'every method trains on the same experience.')
     group.add_argument('--psro-meta-solver', type=str, default='auto',
                        choices=META_SOLVERS.names(),
                        help="'auto' = nash for two-player zero-sum tables, else prd. "
@@ -234,7 +283,9 @@ def _add_gems_config(parser):
     # 2026, App. Table 3). Marked "not in paper" where the paper is silent.
     group = parser.add_argument_group('gems')
     # budget / population
-    group.add_argument('--gems-iterations', type=int, default=40, help='Outer iterations T.')
+    group.add_argument('--gems-iterations', type=int, default=None,
+                       help='Optional cap on outer iterations T (the paper: 40). Default: none -- '
+                            'the env-step budget is the only stopping rule.')
     group.add_argument('--gems-init-anchors', type=int, default=1, help='k0 per seat.')
     group.add_argument('--gems-max-anchors', type=int, default=32, help='k_max per seat.')
     group.add_argument('--gems-replacement', type=str, default='least_mass',
@@ -284,9 +335,22 @@ def _add_gems_config(parser):
                        help='GAE lambda. Not in paper.')
 
 
+def _add_exploit_config(parser):
+    # Post-hoc approximate NashConv (posthoc.py exploit). The same protocol for
+    # every method, seed and env: a fresh PPO learner (ppo group above) trains a
+    # best response for each seat against the run's final joint policy.
+    group = parser.add_argument_group('exploit')
+    group.add_argument('--exploit-steps', type=int, default=1_000_000,
+                       help='Env steps of best-response training per seat.')
+    group.add_argument('--exploit-eval-episodes', type=int, default=1000,
+                       help='Episodes to value the best response and the final policy.')
+
+
 def get_config():
+    # allow_abbrev=False: parse_args() detects explicit flags by their full name.
     parser = argparse.ArgumentParser(
-        description='SEPSRO', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        description='SEPSRO', formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False)
     _add_run_config(parser)
     _add_env_config(parser)
     _add_eval_config(parser)
@@ -295,7 +359,39 @@ def get_config():
     _add_dqn_config(parser)
     _add_ppo_config(parser)
     _add_gems_config(parser)
+    _add_exploit_config(parser)
     return parser
+
+
+def explicit_dests(parser, argv):
+    """Names of the settings given on the command line in argv."""
+    given = {token.split('=', 1)[0] for token in argv if token.startswith('--')}
+    return {action.dest for action in parser._actions
+            if any(option in given for option in action.option_strings)}
+
+
+def apply_env_overrides(args, explicit):
+    """ENV_OVERRIDES for args.env, except for settings given explicitly."""
+    applied = {}
+    for key, value in ENV_OVERRIDES.get(args.env_name, {}).items():
+        if not hasattr(args, key):
+            raise KeyError(f'ENV_OVERRIDES[{args.env_name!r}] sets unknown setting {key!r}.')
+        if key not in explicit:
+            setattr(args, key, value)
+            applied[key] = value
+    args.env_overrides = applied
+    return args
+
+
+def parse_args(argv=None, parser=None):
+    """argv -> resolved args with per-env overrides; what main.py runs on."""
+    import sys
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = parser or get_config()
+    args = parser.parse_args(argv)
+    args.env_preset = parse_env(args.env)
+    args.env_name = args.env_preset['name']
+    return resolve(apply_env_overrides(args, explicit_dests(parser, argv)))
 
 
 def resolve(args):

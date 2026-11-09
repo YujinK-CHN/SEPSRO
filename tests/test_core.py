@@ -189,7 +189,10 @@ def test_main_random_end_to_end(tmp_path):
     run_dir = tmp_path / 'check' / env / 'random' / 'seed0'
     records = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     assert records[0]['budget_used'] == 0
-    assert records[-1]['final'] and records[-1]['budget_used'] >= 300
+    assert records[-1]['final'] and records[-1]['budget_used'] == 300   # hard stop
+    # Before training, every --eval-interval (300 / 20 = 15) steps, and at the end.
+    assert [r['budget_used'] for r in records] == list(range(0, 300, 15)) + [300]
+    assert (run_dir / 'final_policies.pkl').exists()
     assert {'method', 'env', 'seed', 'vs_random/mean'} <= set(records[-1])
     assert (run_dir / 'config.json').exists()
 

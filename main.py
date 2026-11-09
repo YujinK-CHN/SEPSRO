@@ -12,15 +12,26 @@ same --budget every method gets the same number of environment steps, the same
 evaluation watermarks and the same metrics, so their eval.jsonl files can be
 plotted on one axis without any post-hoc alignment.
 
-Output: results/<exp-name>/<env>/<method>/seed<seed>/{config.json, eval.jsonl, train.jsonl}
+Output: results/<exp-name>/<env>/<method>/seed<seed>/
+    config.json          every setting, after per-env overrides (see config.ENV_OVERRIDES)
+    eval.jsonl           one record per evaluation: before training, every
+                         --eval-interval env steps, and at the end
+    train.jsonl          method internals
+    final_policies.pkl   the joint policy scored by the final evaluation, for
+                         the post-hoc metrics in posthoc.py (approximate
+                         NashConv, cross-play)
+
+The budget is a hard stop: training ends at exactly --budget env steps, and
+the final evaluation scores what the method had committed by then.
 """
 
 import os
+import pickle
 
 import numpy as np
 
-from config import get_config, resolve, save_config
-from sepsro.budget import BudgetTracker
+from config import parse_args, save_config
+from sepsro.budget import BudgetExhausted, BudgetTracker
 from sepsro.envs import make_env
 from sepsro.evaluation import Evaluator
 from sepsro.logging import RunLogger
@@ -28,7 +39,7 @@ from sepsro.registry import METHODS
 from sepsro.utils import set_seed
 
 
-LOG_FILES = ('eval.jsonl', 'train.jsonl')
+LOG_FILES = ('eval.jsonl', 'train.jsonl', 'final_policies.pkl')
 
 
 def prepare_run_dir(run_dir, overwrite):
@@ -48,7 +59,7 @@ def prepare_run_dir(run_dir, overwrite):
 
 
 def main(argv=None):
-    args = resolve(get_config().parse_args(argv))
+    args = parse_args(argv)
     set_seed(args.seed)
 
     def env_fn():
@@ -67,7 +78,7 @@ def main(argv=None):
     logger = RunLogger(args.run_dir, meta={'method': args.method, 'env': args.env_name,
                                            'seed': args.seed, 'budget': args.budget})
 
-    budget = BudgetTracker(args.budget)
+    budget = BudgetTracker(args.budget, hard=True)
     evaluator = Evaluator(env_fn, budget, logger, metrics=args.eval_metrics,
                           interval=args.eval_interval, episodes=args.eval_episodes,
                           seed=args.seed)
@@ -81,11 +92,28 @@ def main(argv=None):
           f'budget={args.budget} seed={args.seed} -> {args.run_dir}', flush=True)
 
     try:
-        method.train()
+        evaluator.start(method)
+        try:
+            method.train()
+        except BudgetExhausted:
+            pass
         evaluator.evaluate(method, final=True)
+        save_policies(method.policies(), os.path.join(args.run_dir, 'final_policies.pkl'))
     finally:
         evaluator.close()
         logger.close()
+
+
+def save_policies(policies, path):
+    """Pickle the final joint policy (agent -> Policy). Load with load_policies()."""
+    with open(path, 'wb') as handle:
+        pickle.dump(policies, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_policies(path):
+    """The joint policy a run saved. Only load files your own runs wrote (pickle)."""
+    with open(path, 'rb') as handle:
+        return pickle.load(handle)
 
 
 if __name__ == '__main__':

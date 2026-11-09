@@ -1,8 +1,9 @@
 """
 PPO for one seat, against opponents held fixed.
 
-The building block for the self-play `ppo` method (not yet registered). PSRO
-does not use it: its oracles follow OpenSpiel's psro_v2 (pg.py, dqn.py). The
+Used as the best-response learner of the post-hoc approximate NashConv
+(posthoc.py exploit), which must be the same for every method; PSRO's own
+oracles follow OpenSpiel's psro_v2 (pg.py, dqn.py) instead. The
 update follows CleanRL's ppo.py
 (clipped surrogate, GAE, advantage normalisation, value loss, entropy bonus,
 global gradient clipping), with two multi-agent changes:
@@ -65,7 +66,7 @@ class NetworkPolicy(Policy):
     @torch.no_grad()
     def evaluate(self, obs, legal_mask):
         """(action probabilities, value) for one observation."""
-        obs_t = torch.as_tensor(np.asarray(obs, dtype=np.float32)).unsqueeze(0)
+        obs_t = torch.as_tensor(np.asarray(obs)).unsqueeze(0)   # uint8 frames stay uint8
         mask_t = torch.as_tensor(np.asarray(legal_mask, dtype=bool)).unsqueeze(0)
         logits, value = self.net(obs_t, mask_t)
         probs = torch.softmax(logits, dim=-1)[0].double().numpy()
@@ -221,7 +222,7 @@ class PPOLearner:
             advantages.append(adv)
             returns.append(adv + values)
             for t in ep:
-                obs.append(np.asarray(t.obs, dtype=np.float32).reshape(-1))
+                obs.append(np.asarray(t.obs))   # shape and dtype kept (CNN for images)
                 masks.append(t.legal_mask)
                 actions.append(t.action)
                 logps.append(t.info['logp'])
@@ -229,7 +230,8 @@ class PPOLearner:
         def tensor(x, dtype):
             return torch.as_tensor(np.asarray(x), dtype=dtype, device=self.device)
 
-        return (tensor(obs, torch.float32), tensor(masks, torch.bool),
+        obs = torch.as_tensor(np.stack(obs), device=self.device)
+        return (obs, tensor(masks, torch.bool),
                 tensor(actions, torch.long), tensor(logps, torch.float32),
                 tensor(np.concatenate(advantages), torch.float32),
                 tensor(np.concatenate(returns), torch.float32))

@@ -3,17 +3,25 @@ The contract every method implements.
 
 main.py builds the shared pieces -- an env factory, the budget, the logger, the
 evaluator, the RNG -- and hands them to the method. A method then owns its own
-training loop and has three obligations:
+training loop and has two obligations:
 
     1. charge every training env step to self.budget (pass budget= to
-       play_episode / PayoffTable, or call budget.consume() for custom loops);
-    2. stop when self.budget.exhausted;
-    3. call self.evaluator.maybe_evaluate(self) regularly, so it is scored at the
-       same watermarks as every other method.
+       play_episode / PayoffTable, or call budget.consume() for custom loops).
+       main.py's tracker is HARD: the step that spends the budget raises
+       BudgetExhausted out of train(), wherever it is; main.py catches it.
+       A method can also return early (e.g. an optional iteration cap).
+    2. answer policies() at ANY moment with its last COMMITTED output -- the
+       joint policy (one Policy per seat) as of its last completed update.
+       The Evaluator calls it from inside training, at budget watermarks
+       that may fall mid-iteration, and once more at the end. It must not
+       expose half-updated state (e.g. a population that has grown before its
+       meta-strategy was re-solved, or networks being trained in place).
+       For PSRO that is the meta-strategy mixture after the last solve; for
+       GEMS the anchors, sigma and a frozen copy of the generator after the
+       last completed iteration.
 
-and must answer policies(): the joint policy (one Policy per seat) that
-represents the method's current output. For PPO that is the learned policy in
-every seat; for PSRO it is the meta-strategy mixture over each population.
+Construction must not spend budget: the Evaluator scores the method once
+before train() starts, at budget_used = 0.
 
 Method-specific hyper-parameters are read from self.args; their defaults live
 in the method's argument group in config.py.

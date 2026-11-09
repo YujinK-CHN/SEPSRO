@@ -2,7 +2,7 @@
 Uniform-random joint policy. Not a research method: it is the pipeline check.
 
 It exercises every shared component -- env construction, rollouts, budget
-charging, evaluation watermarks, logging -- without learning anything, so
+charging and its hard stop, evaluation watermarks, logging -- without learning anything, so
 `python main.py --method random --env <env>` verifies a new environment or
 machine end-to-end, and gives the floor every real method should beat.
 """
@@ -25,7 +25,6 @@ class RandomBaseline(Method):
 
     def train(self):
         while not self.budget.exhausted:
-            self.evaluator.maybe_evaluate(self)
             result = play_episode(self.env, self._policies, self.rng, budget=self.budget)
             self.logger.train('episode', {'budget_used': self.budget.used,
                                           'length': result.length,

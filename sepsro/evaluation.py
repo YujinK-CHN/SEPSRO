@@ -2,16 +2,19 @@
 Method-agnostic evaluation at budget watermarks.
 
 Every method exposes its current joint policy through Method.policies(); the
-Evaluator scores it with the metrics named in --eval-metrics at fixed points of
-the budget (every --eval-interval env steps, plus once at the end). Because the
-watermarks and metrics are the same for every method, eval.jsonl from any two
-runs is directly comparable.
+Evaluator scores it with the metrics named in --eval-metrics at fixed env-step
+counts: once before training, at every multiple of --eval-interval (the
+budget's watermarks fire the evaluation from inside the training loop, so
+methods with long iterations are scored at the same points as everyone
+else), and once at the end. Because the watermarks and metrics are the same
+for every method, eval.jsonl from any two runs is directly comparable.
 
 Evaluation rollouts are NOT charged to the training budget.
 
 Adding a metric: write fn(env, policies, rng, episodes) -> dict of scalars and
-decorate it with @METRICS.register('<name>'). Exploitability / NashConv for
-OpenSpiel games belongs here once the policy -> pyspiel bridge exists.
+decorate it with @METRICS.register('<name>'). Exact NashConv lives in
+exploitability.py; the post-hoc metrics (approximate NashConv, cross-play) in
+posthoc.py.
 """
 
 from __future__ import annotations
@@ -55,14 +58,13 @@ class Evaluator:
         # Separate stream from training so evaluating more or less often never
         # changes what a method trains on.
         self.rng = np.random.default_rng([seed, 1])
-        self._next = 0
+        self.method = None
 
-    def maybe_evaluate(self, method):
-        """Call from a method's training loop; evaluates once per crossed watermark."""
-        if self.budget.used >= self._next:
-            self.evaluate(method)
-            while self._next <= self.budget.used:
-                self._next += self.interval
+    def start(self, method):
+        """Score the untrained method now, and at every --eval-interval env steps from here on."""
+        self.method = method
+        self.evaluate(method)
+        self.budget.watch(self.interval, lambda _: self.evaluate(self.method))
 
     def evaluate(self, method, final=False):
         policies = method.policies()

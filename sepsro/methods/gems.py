@@ -46,10 +46,13 @@ seat (unbiased, like the paper's importance-weighted shared-batch estimator,
 with lower variance and more episodes).
 
 Budget: every episode of every phase is charged, including the random-play
-episodes that set the reward range for PettingZoo envs. An iteration that has
-started is completed, so the budget can be overshot by one iteration; the
-final eval record logs the true budget_used. The learners run on CPU whatever
---device says (rollouts are one step at a time).
+episodes that set the reward range for PettingZoo envs (played at the start
+of train(), so construction spends nothing). Training stops exactly when the
+budget is spent (main.py's tracker is hard), mid-iteration if need be, or
+after --gems-iterations if that optional cap is set. What is evaluated at any
+moment is the output of the last COMPLETED iteration: its anchors, sigma and a
+frozen copy of each generator (ABR-TR trains the live one in place). The
+learners run on CPU whatever --device says (rollouts are one step at a time).
 """
 
 from __future__ import annotations
@@ -116,7 +119,7 @@ class GEMS(Method):
         torch.manual_seed(a.seed)
         self.env = self.env_fn()
         self.agents = self.spec.agents
-        self.range = return_range(self.env, self.rng, budget=self.budget)
+        self.range = None   # per-seat return range; train() measures it (it costs budget)
         d = a.gems_latent_dim
 
         self.gen, self.critic, self.gen_opt, self.critic_opt = {}, {}, {}, {}
@@ -137,12 +140,14 @@ class GEMS(Method):
         self.iteration = 0
         self._members = {}
         self._refresh()
+        self._commit()
 
     # ------------------------------------------------------------------ loop
     def train(self):
         a = self.args
-        while not self.budget.exhausted and self.iteration < a.gems_iterations:
-            self.evaluator.maybe_evaluate(self)
+        self.range = return_range(self.env, self.rng, budget=self.budget)
+        cap = a.gems_iterations
+        while not self.budget.exhausted and (cap is None or self.iteration < cap):
             self.iteration += 1
             record = {'iteration': self.iteration}
 
@@ -171,10 +176,11 @@ class GEMS(Method):
                           meta_strategy={p: self.sigma[p] for p in self.agents},
                           anchors={p: len(self.anchors[p]) for p in self.agents})
             self.logger.train('gems_iteration', record)
+            self._commit()
         self.env.close()
 
     def policies(self):
-        return {p: MixturePolicy(self._members[p], self.sigma[p]) for p in self.agents}
+        return self._output
 
     def variant(self):
         return {'generator': self.args.gems_generator}
@@ -185,6 +191,15 @@ class GEMS(Method):
         tau = self.args.gems_temperature
         self._members = {p: [GeneratorPolicy(self.gen[p], z, tau) for z in self.anchors[p]]
                          for p in self.agents}
+
+    def _commit(self):
+        """Freeze the current output: what policies() returns until the next iteration ends."""
+        tau = self.args.gems_temperature
+        self._output = {}
+        for p in self.agents:
+            frozen = copy.deepcopy(self.gen[p]).eval()
+            self._output[p] = MixturePolicy([GeneratorPolicy(frozen, z, tau) for z in self.anchors[p]],
+                                            self.sigma[p].copy())
 
     def _norm(self, p, value):
         low, high = self.range[p]

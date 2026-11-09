@@ -20,6 +20,16 @@
 # and refuses run directories that already hold logs unless --overwrite is
 # among the main.py flags -- the same rule main.py enforces, checked early.
 #
+# --task picks what the jobs run (default train):
+#   train      main.py, one array task per (method, seed)
+#   exploit    posthoc.py exploit on those finished runs: approximate NashConv,
+#              one array task per (method, seed); needs their final_policies.pkl
+#   crossplay  posthoc.py crossplay over every finished run of --exp-name / --env:
+#              one task (the matrix covers all runs found; --method only names the job)
+#
+#   bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
+#       --env space_invaders --seeds 0,1,2,3,4 --task exploit --time 12:00:00
+#
 # Resources default to CPU-only: SEPSRO's learners run on CPU (rollouts are one
 # step at a time), so a GPU would sit idle. --gpus 1 requests one per task.
 #
@@ -33,6 +43,7 @@
 #   --venv      (or $SEPSRO_VENV)      default ~/venvs/sepsro
 #   --out-root  (or $SEPSRO_OUT)       default <repo>/results; ~/scratch/... for big sweeps
 #   --python-module                    default python/3.11 (must match setup_cluster.sh)
+#   --task      train | exploit | crossplay   (see above)
 #   --dry-run                          write and print the job script, submit nothing
 set -euo pipefail
 
@@ -47,6 +58,7 @@ VENV="${SEPSRO_VENV:-$HOME/venvs/sepsro}"
 OUT_ROOT="${SEPSRO_OUT:-$REPO/results}"
 PYTHON_MODULE="${SEPSRO_PYTHON_MODULE:-python/3.11}"
 DRY_RUN=0
+TASK=train
 
 METHODS=()
 ENV_NAME="kuhn_poker"
@@ -68,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --out-root) OUT_ROOT="$2"; shift 2;;
     --python-module) PYTHON_MODULE="$2"; shift 2;;
     --dry-run)  DRY_RUN=1;     shift;;
+    --task)     TASK="$2";     shift 2;;
     --method)   METHODS+=("$2"); shift 2;;
     --env)      ENV_NAME="$2"; shift 2;;
     --budget)   BUDGET="$2";   shift 2;;
@@ -78,6 +91,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ ${#METHODS[@]} -eq 0 ]] && METHODS=(random)
+case "$TASK" in
+  train|exploit|crossplay) ;;
+  *) echo "--task must be train, exploit or crossplay, got '$TASK'." >&2; exit 1;;
+esac
 
 if [[ -z "$ACCOUNT" && $DRY_RUN -eq 0 ]]; then
   echo "No --account given and \$SEPSRO_ACCOUNT is unset." >&2
@@ -90,6 +107,7 @@ TASKS=()                                   # "method seed" per array index
 for m in "${METHODS[@]}"; do
   for s in "${SEED_LIST[@]}"; do TASKS+=("$m $s"); done
 done
+[[ "$TASK" == crossplay ]] && TASKS=("all 0")   # one job over every finished run
 N_TASKS=${#TASKS[@]}
 
 # ---- checks on the login node, where failures are cheap -------------------- #
@@ -102,14 +120,15 @@ overwrite=0
 for a in "${PASS[@]+"${PASS[@]}"}"; do [[ "$a" == "--overwrite" ]] && overwrite=1; done
 
 echo "[submit] checking env '$ENV_NAME' and run directories on the login node"
-( cd "$REPO" && python - "$ENV_NAME" "$OUT_ROOT" "$EXP_NAME" "$overwrite" "${TASKS[@]}" <<'PYEOF'
+( cd "$REPO" && python - "$TASK" "$ENV_NAME" "$OUT_ROOT" "$EXP_NAME" "$overwrite" "${TASKS[@]}" <<'PYEOF'
 import os, sys
 import warnings
 warnings.filterwarnings('ignore')
 from config import parse_env
 from sepsro.envs import make_env
 
-env_name, out_root, exp, overwrite, tasks = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == '1', sys.argv[5:]
+task, env_name, out_root, exp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+overwrite, tasks = sys.argv[5] == '1', sys.argv[6:]
 preset = parse_env(env_name)
 try:
     env = make_env(preset)
@@ -121,24 +140,44 @@ except Exception as exc:
              '         (missing package? for space_invaders run AutoROM on the login node)')
 print(f'[submit] env ok: {spec.backend}, agents {list(spec.agents)}, obs {dict(spec.obs_shape)}')
 
-clash = []
-for task in tasks:
-    method, seed = task.split()
-    run_dir = os.path.join(out_root, exp, preset['name'], method, f'seed{seed}')
-    if any(os.path.exists(os.path.join(run_dir, f)) for f in ('eval.jsonl', 'train.jsonl')):
-        clash.append(run_dir)
-if clash and not overwrite:
-    sys.exit('[submit] these runs already have logs (use another --exp-name, or --overwrite):\n  '
-             + '\n  '.join(clash))
+env_dir = os.path.join(out_root, exp, preset['name'])
+if task == 'crossplay':
+    import glob
+    found = glob.glob(os.path.join(env_dir, '**', 'final_policies.pkl'), recursive=True)
+    if len(found) < 2:
+        sys.exit(f'[submit] cross-play needs at least two finished runs under {env_dir}; '
+                 f'found {len(found)}.')
+    print(f'[submit] cross-play over {len(found)} finished runs')
+    sys.exit()
+
+problems = []
+for item in tasks:
+    method, seed = item.split()
+    run_dir = os.path.join(env_dir, method, f'seed{seed}')
+    if task == 'train':
+        if any(os.path.exists(os.path.join(run_dir, f)) for f in ('eval.jsonl', 'train.jsonl')):
+            problems.append(run_dir)
+    elif not os.path.exists(os.path.join(run_dir, 'final_policies.pkl')):
+        sys.exit(f'[submit] {run_dir} has no final_policies.pkl: train it first.')
+    elif os.path.exists(os.path.join(run_dir, 'exploit.json')):
+        problems.append(run_dir)
+if problems and not overwrite:
+    what = 'logs' if task == 'train' else 'an exploit.json'
+    sys.exit(f'[submit] these runs already have {what} (use another --exp-name, or --overwrite):\n  '
+             + '\n  '.join(problems))
 PYEOF
 )
 
 # ---- build the job script ------------------------------------------------- #
 # Slurm reads #SBATCH lines literally (no shell quoting), so the job name is
 # sanitised; the real --exp-name, parentheses and all, still reaches main.py.
+ENV_DIR_NAME="$(cd "$REPO" && python -c 'import sys; from config import parse_env; print(parse_env(sys.argv[1])["name"])' "$ENV_NAME")"
 SAFE_NAME="${EXP_NAME//[^A-Za-z0-9._-]/_}"
+[[ "$TASK" != train ]] && SAFE_NAME="${SAFE_NAME}_${TASK}"
+METHOD_TAG="$(IFS=-; echo "${METHODS[*]}")"
 mkdir -p "$OUT_ROOT/jobs" "$OUT_ROOT/logs"
-JOB="$OUT_ROOT/jobs/${SAFE_NAME}.sbatch"
+# One script file per submission, so submitting each method separately keeps both.
+JOB="$OUT_ROOT/jobs/${SAFE_NAME}_${METHOD_TAG//[^A-Za-z0-9._-]/_}.sbatch"
 
 q() { printf '%q' "$1"; }
 TASK_LINES=""
@@ -147,6 +186,13 @@ MAIN_ARGS=""
 for a in "${PASS[@]+"${PASS[@]}"}"; do MAIN_ARGS+=" $(q "$a")"; done
 
 GRES_LINE=""
+RUN_DIR="$(q "$OUT_ROOT/$EXP_NAME/$ENV_DIR_NAME")"
+case "$TASK" in
+  train)     COMMAND="python main.py --method \"\$METHOD\" --seed \"\$SEED\" --env $(q "$ENV_NAME") --budget $(q "$BUDGET") \\
+    --exp-name $(q "$EXP_NAME") --results-dir $(q "$OUT_ROOT")${MAIN_ARGS}";;
+  exploit)   COMMAND="python posthoc.py exploit ${RUN_DIR}/\$METHOD/seed\$SEED${MAIN_ARGS}";;
+  crossplay) COMMAND="python posthoc.py crossplay ${RUN_DIR}${MAIN_ARGS}";;
+esac
 if [[ "$GPUS" != "0" ]]; then
   GRES_LINE="#SBATCH --gres=gpu:${GPU_TYPE:+${GPU_TYPE}:}${GPUS}"
 fi
@@ -177,8 +223,7 @@ echo "task    : \$SLURM_ARRAY_TASK_ID  method=\$METHOD seed=\$SEED  on \$(hostna
 echo "commit  : \$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "started : \$(date)"
 
-python main.py --method "\$METHOD" --seed "\$SEED" --env $(q "$ENV_NAME") --budget $(q "$BUDGET") \\
-    --exp-name $(q "$EXP_NAME") --results-dir $(q "$OUT_ROOT")${MAIN_ARGS}
+${COMMAND}
 
 echo "finished: \$(date)"
 EOF

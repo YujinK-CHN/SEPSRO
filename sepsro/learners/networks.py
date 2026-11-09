@@ -71,15 +71,20 @@ def _layer(in_dim, out_dim, gain):
 
 
 class ActorCritic(nn.Module):
-    """Separate actor and critic MLPs (CleanRL's default layout)."""
+    """Separate actor and critic MLPs (CleanRL's default layout) over a shared encoder.
+
+    The encoder is make_encoder(): for vectors it only flattens, so actor and
+    critic are fully separate MLPs as before; for image stacks it is one
+    Nature-DQN CNN shared by both heads, as in CleanRL's Atari PPO.
+    """
 
     def __init__(self, obs_shape, num_actions, hidden=(128, 128)):
         super().__init__()
-        self.obs_dim = int(np.prod(obs_shape))
+        self.encoder = make_encoder(obs_shape)
         self.num_actions = int(num_actions)
 
         def body():
-            layers, last = [], self.obs_dim
+            layers, last = [], self.encoder.out_dim
             for width in hidden:
                 layers += [_layer(last, width, np.sqrt(2)), nn.Tanh()]
                 last = width
@@ -91,7 +96,7 @@ class ActorCritic(nn.Module):
         self.critic = nn.Sequential(*critic, _layer(last, 1, 1.0))
 
     def forward(self, obs, mask):
-        obs = obs.reshape(obs.shape[0], -1)
-        logits = self.actor(obs).masked_fill(~mask, MASK_VALUE)
-        value = self.critic(obs).squeeze(-1)
+        features = self.encoder(obs)
+        logits = self.actor(features).masked_fill(~mask, MASK_VALUE)
+        value = self.critic(features).squeeze(-1)
         return logits, value

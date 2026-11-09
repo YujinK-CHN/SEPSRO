@@ -145,6 +145,22 @@ def test_rl_learners_train_on_images(kind):
         assert learner._buf['obs'].dtype == np.uint8
 
 
+def test_ppo_best_response_learner_on_images():
+    """The post-hoc exploiter (PPO) runs its CNN path on stacked uint8 frames."""
+    from sepsro.budget import BudgetTracker
+    from sepsro.learners.ppo import PPOConfig, PPOLearner
+    env = AtariPreprocessing(FakeAtari(length=24))
+    learner = PPOLearner(env.spec.obs_shape['first_0'], 6,
+                         PPOConfig(rollout_steps=16, hidden=(16,)), seed=0)
+    before = [p.detach().clone() for p in learner.net.parameters()]
+    learner.train(env, 'first_0', {'second_0': RandomPolicy()}, np.random.default_rng(0),
+                  BudgetTracker(64), steps=64)
+    assert any((a != b).any() for a, b in zip(before, learner.net.parameters()))
+    probs = learner.policy().action_probs(env.reset(seed=0).observations['first_0'],
+                                          np.ones(6, bool))
+    assert abs(probs.sum() - 1) < 1e-9
+
+
 @pytest.mark.parametrize('generator', ['hyper', 'conditional'])
 def test_gems_on_images(tmp_path, generator, monkeypatch):
     """GEMS end to end on the fake Atari game (registered as an ad-hoc preset)."""
