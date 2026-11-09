@@ -73,10 +73,13 @@ ENV_PRESETS = {
     # PettingZoo Atari (needs `pip install "pettingzoo[atari]" autorom` + `AutoROM`).
     # Two players, both scoring against the invaders (not zero-sum). Standard
     # Atari preprocessing: 4-frame skip with max-pooling, 84x84, 4-frame stack;
-    # one env step = one decision = 4 emulator frames.
+    # one env step = one decision = 4 emulator frames. Sticky actions 0.25
+    # (Machado et al., 2018): PettingZoo turns ALE's own off, which leaves the
+    # game deterministic.
     'space_invaders':   {'backend': 'pettingzoo', 'id': 'pettingzoo.atari.space_invaders_v2',
                          'api': 'parallel', 'kwargs': {'obs_type': 'grayscale_image'},
-                         'wrappers': {'atari': {'frame_skip': 4, 'stack': 4, 'size': 84}}},
+                         'wrappers': {'atari': {'frame_skip': 4, 'stack': 4, 'size': 84,
+                                                'sticky_actions': 0.25}}},
 }
 
 

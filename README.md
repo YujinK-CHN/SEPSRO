@@ -112,7 +112,12 @@ python main.py --method gems --env space_invaders --budget 100000000
 The `space_invaders` preset is `pettingzoo.atari.space_invaders_v2` (Parallel
 API, grey-scale) behind `AtariPreprocessing` (`sepsro/envs/wrappers.py`):
 4-frame skip with max-pooling of the last two frames, 84x84, 4-frame stack,
-uint8 observations of shape `[4, 84, 84]`. One env step = one decision = 4
+uint8 observations of shape `[4, 84, 84]`, and sticky actions with probability
+0.25 (Machado et al., 2018): at every emulator frame each player repeats its
+previously executed action instead of its chosen one with that probability.
+PettingZoo sets ALE's own `repeat_action_probability` to 0, and without it the
+game is deterministic: one action sequence always replays the same episode, so
+policies can memorise moves instead of reacting. One env step = one decision = 4
 emulator frames, so `--budget` and `--max-episode-steps` count decisions. Two
 players, 6 actions each, both scoring against the invaders (not zero-sum: use
 PRD / GEMS's OMWU, not the Nash LP). No exact NashConv exists; evaluate with
@@ -120,7 +125,9 @@ PRD / GEMS's OMWU, not the Nash LP). No exact NashConv exists; evaluate with
 
 Image observations go through a Nature-DQN CNN (`learners/networks.py`) in PG,
 DQN and GEMS (for GEMS's `hyper` generator the CNN torso is shared and the
-policy head is generated from z).
+policy head is generated from z). The hypernetwork generates each distinct
+code's weights once per batch, not once per transition, which on Space Invaders
+halves both the time and the memory of a GEMS ABR-TR update.
 
 Measured cost (WSL, CPU, 8 threads): random play ~380 decisions and 0.6 s per
 episode; CNN policies ~450-500 decisions and 1.1-1.2 s per episode; a PG

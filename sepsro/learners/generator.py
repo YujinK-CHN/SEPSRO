@@ -73,21 +73,49 @@ class HyperGenerator(nn.Module):
         """z: [B, d] -> flat policy parameters [B, P]."""
         return self.hyper(z)
 
-    def logits_from_params(self, params, obs):
-        """params [B, P] (or [1, P], shared), obs [B, *obs_shape] -> logits [B, A]."""
-        obs = self.encoder(obs)
-        if params.shape[0] == 1 and obs.shape[0] > 1:
-            params = params.expand(obs.shape[0], -1)
+    def _unflatten(self, params):
+        """[..., P] -> (w1, b1, w2, b2), each with the same leading dims."""
         chunks, i = [], 0
         for shape in self.shapes:
             n = int(np.prod(shape))
-            chunks.append(params[:, i:i + n].reshape(-1, *shape))
+            chunks.append(params[..., i:i + n].reshape(*params.shape[:-1], *shape))
             i += n
-        w1, b1, w2, b2 = chunks
-        hidden = torch.tanh(torch.einsum('bho,bo->bh', w1, obs) + b1)
+        return chunks
+
+    def _head(self, flat, features):
+        """ONE policy's flat parameters [P] applied to encoded obs [N, obs_dim] -> logits [N, A]."""
+        w1, b1, w2, b2 = self._unflatten(flat)
+        return torch.tanh(features @ w1.T + b1) @ w2.T + b2
+
+    def logits_from_params(self, params, obs):
+        """params [B, P] (or [1, P], shared), obs [B, *obs_shape] -> logits [B, A]."""
+        features = self.encoder(obs)
+        if params.shape[0] == 1:
+            return self._head(params[0], features)
+        w1, b1, w2, b2 = self._unflatten(params)
+        hidden = torch.tanh(torch.einsum('bho,bo->bh', w1, features) + b1)
         return torch.einsum('bah,bh->ba', w2, hidden) + b2
 
     def forward(self, obs, z):
+        """obs [B, *obs_shape], z [B, d] -> logits [B, A].
+
+        A training batch repeats a few codes over many transitions (ABR-TR:
+        16 anchors x ~400 steps on Space Invaders). Generating a full weight
+        vector per ROW would materialise B x P parameters (~7k x 33k floats
+        there, several GB with gradients); instead each distinct code is
+        generated once and applied to its own rows. Same result, as the
+        per-row path computes the same function of (obs, z).
+        """
+        if z.shape[0] > 1 and not z.requires_grad:
+            codes, group = torch.unique(z, dim=0, return_inverse=True)
+            if codes.shape[0] < z.shape[0]:
+                flat = self.hyper(codes)
+                features = self.encoder(obs)
+                logits = features.new_empty(features.shape[0], self.num_actions)
+                for k in range(codes.shape[0]):
+                    rows = (group == k).nonzero(as_tuple=True)[0]
+                    logits = logits.index_copy(0, rows, self._head(flat[k], features[rows]))
+                return logits
         return self.logits_from_params(self.params(z), obs)
 
 

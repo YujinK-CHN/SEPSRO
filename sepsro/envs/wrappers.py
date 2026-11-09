@@ -11,6 +11,17 @@ agent:
                  which removes Atari sprite flicker
     resize       to size x size (area interpolation, via torch, so no OpenCV)
     frame stack  the last `stack` processed frames -> observation [stack, H, W]
+    sticky       (sticky_actions = p) at every emulator frame, each agent's
+                 PREVIOUSLY EXECUTED action is repeated instead of its chosen
+                 one with probability p (Machado et al., 2018; ALE's
+                 repeat_action_probability). The previous action starts as 0
+                 (NOOP in the minimal Atari action sets) at every reset.
+
+Why sticky actions here: PettingZoo's Atari envs hard-code ALE's
+repeat_action_probability to 0, and Atari games are deterministic, so without
+them a fixed action sequence always produces the same episode and a policy can
+memorise an open-loop sequence instead of reacting. The draws come from this
+wrapper's RNG, which reset(seed=...) seeds, so episodes stay reproducible.
 
 Observations stay uint8 (0..255): a replay buffer of 84 x 84 x 4 frames costs a
 quarter of the memory in float32. Networks divide by 255 in their image encoder
@@ -34,10 +45,13 @@ from .base import EnvSpec, MultiAgentEnv, TimeStep
 class AtariPreprocessing(MultiAgentEnv):
 
     def __init__(self, env: MultiAgentEnv, frame_skip=4, stack=4, size=84, max_pool=True,
-                 max_episode_steps=None):
+                 sticky_actions=0.0, max_episode_steps=None):
         super().__init__()
+        if not 0.0 <= sticky_actions <= 1.0:
+            raise ValueError(f'sticky_actions must be in [0, 1], got {sticky_actions}.')
         self.env = env
         self.frame_skip, self.stack, self.size, self.max_pool = frame_skip, stack, size, max_pool
+        self.sticky_actions = float(sticky_actions)
         inner = env.spec
         self.spec = EnvSpec(
             name=inner.name,
@@ -50,6 +64,7 @@ class AtariPreprocessing(MultiAgentEnv):
             max_episode_steps=max_episode_steps,
         )
         self._frames = {}
+        self._executed = {}   # agent -> action actually sent to the env last frame
 
     @property
     def raw(self):
@@ -62,6 +77,7 @@ class AtariPreprocessing(MultiAgentEnv):
     def _reset(self, seed):
         timestep = self.env.reset(seed=seed)
         self._frames = {}
+        self._executed = {}
         for agent, obs in timestep.observations.items():
             frame = self._process(obs)
             self._frames[agent] = collections.deque([frame] * self.stack, maxlen=self.stack)
@@ -73,7 +89,7 @@ class AtariPreprocessing(MultiAgentEnv):
         timestep = None
         for _ in range(self.frame_skip):
             live = actions if timestep is None else {a: actions[a] for a in timestep.acting}
-            timestep = self.env.step(live)
+            timestep = self.env.step(self._sticky(live))
             for agent, r in timestep.rewards.items():
                 rewards[agent] += r
             for agent, obs in timestep.observations.items():
@@ -87,6 +103,17 @@ class AtariPreprocessing(MultiAgentEnv):
         return self._wrap(timestep, rewards)
 
     # ------------------------------------------------------------ helpers
+    def _sticky(self, chosen):
+        """One emulator frame's actions: each agent repeats its last executed action w.p. p."""
+        if self.sticky_actions <= 0.0:
+            return chosen
+        executed = {}
+        for agent, action in chosen.items():
+            if self.rng.random() < self.sticky_actions:
+                action = self._executed.get(agent, 0)
+            executed[agent] = self._executed[agent] = int(action)
+        return executed
+
     def _process(self, obs):
         """[H, W] or [H, W, C] frame -> [size, size] uint8 (channels averaged to grey)."""
         frame = np.asarray(obs, dtype=np.float32)

@@ -6,7 +6,9 @@ GEMS pieces, checked against known answers, plus end-to-end runs.
                       on zero-sum games, plain MWU only on average)
     eb_ucb            the formula of Eq. 7
     generator         policies start near uniform, respect action masks, and a
-                      code's policy is a deterministic function of it
+                      code's policy is a deterministic function of it; the
+                      hypernetwork's once-per-code batch path equals the
+                      per-row one, in values and in gradients
     GEMS              runs on native, PettingZoo (AEC + Parallel) and OpenSpiel
                       envs; anchors grow and are capped
 """
@@ -79,6 +81,30 @@ def test_generator_policies(kind):
         if kind == 'hyper':
             assert probs[mask].min() > 0.15     # starts near uniform over legal actions
         np.testing.assert_allclose(probs, GeneratorPolicy(gen, z).action_probs(obs, mask))
+
+
+@pytest.mark.parametrize('obs_shape', [(7,), (4, 84, 84)])
+def test_hyper_generator_groups_codes_exactly(obs_shape):
+    """Batches repeating a few codes (as in ABR-TR) give the same logits and
+    gradients as generating weights for every row."""
+    torch.manual_seed(0)
+    gen = make_generator('hyper', obs_shape, 5, 3, (8,), 6)
+    codes = torch.randn(3, 3)
+    z = codes[torch.tensor([0, 0, 1, 2, 1, 0, 2, 2])]
+    obs = (torch.randint(0, 256, (8, *obs_shape), dtype=torch.uint8) if len(obs_shape) == 3
+           else torch.randn(8, *obs_shape))
+    weights = torch.randn(8, 5)
+
+    grouped = gen(obs, z)
+    (grouped * weights).sum().backward()
+    grads = [p.grad.clone() for p in gen.parameters()]
+    gen.zero_grad()
+    per_row = gen.logits_from_params(gen.params(z), obs)
+    (per_row * weights).sum().backward()
+
+    assert torch.allclose(grouped, per_row, atol=1e-5)
+    for a, p in zip(grads, gen.parameters()):
+        assert torch.allclose(a, p.grad, atol=1e-5)
 
 
 def test_return_range_native():

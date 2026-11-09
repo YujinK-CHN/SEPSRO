@@ -26,11 +26,13 @@ from sepsro.envs.wrappers import AtariPreprocessing  # noqa: E402
 
 class FakeAtari(MultiAgentEnv):
     """Two players, 210x160 grey frames whose pixels equal the frame counter;
-    reward 1 to each player per frame; ends after `length` frames."""
+    reward 1 to each player per frame; ends after `length` frames. Records the
+    actions it receives, one dict per frame."""
 
     def __init__(self, length=40):
         super().__init__()
         self.length = length
+        self.received = []
         agents = ('first_0', 'second_0')
         self.spec = EnvSpec(name='fake_atari', backend='pettingzoo', agents=agents,
                             num_actions={a: 6 for a in agents},
@@ -46,6 +48,7 @@ class FakeAtari(MultiAgentEnv):
 
     def _step(self, actions):
         assert set(actions) == set(self.spec.agents)
+        self.received.append(dict(actions))
         self.frame += 1
         done = self.frame >= self.length
         return TimeStep(self._frame(), {} if done else {a: np.ones(6, bool) for a in self.spec.agents},
@@ -74,6 +77,42 @@ def test_atari_wrapper_truncation_counts_decisions():
     env = AtariPreprocessing(FakeAtari(length=1000), max_episode_steps=3)
     ep = play_episode(env, {a: RandomPolicy() for a in env.spec.agents}, np.random.default_rng(0))
     assert ep.length == 3 and ep.truncated
+
+
+def _sticky_frames(p, seed, decisions=200, frame_skip=4):
+    """Chosen action per decision cycles 1..5; returns (chosen, executed) per frame for first_0."""
+    fake = FakeAtari(length=10 ** 6)
+    env = AtariPreprocessing(fake, frame_skip=frame_skip, sticky_actions=p)
+    env.reset(seed=seed)
+    chosen = []
+    for t in range(decisions):
+        action = 1 + t % 5
+        env.step({a: action for a in env.spec.agents})
+        chosen += [action] * frame_skip
+    return chosen, [frame['first_0'] for frame in fake.received]
+
+
+def test_sticky_actions_off_and_always():
+    chosen, executed = _sticky_frames(0.0, seed=0, decisions=20)
+    assert executed == chosen
+    _, executed = _sticky_frames(1.0, seed=0, decisions=20)
+    assert executed == [0] * len(executed)              # NOOP forever
+
+
+def test_sticky_actions_rate_and_reproducibility():
+    # One frame per decision and a new chosen action every frame, so (almost)
+    # every sticky draw that fires is visible as executed != chosen.
+    chosen, executed = _sticky_frames(0.25, seed=0, decisions=4000, frame_skip=1)
+    assert all(e == c or e == prev for c, e, prev in zip(chosen, executed, [0] + executed))
+    assert 0.22 < np.mean([e != c for c, e in zip(chosen, executed)]) < 0.28
+    chosen, executed = _sticky_frames(0.25, seed=0)
+    assert _sticky_frames(0.25, seed=0)[1] == executed  # same seed, same frames
+    assert _sticky_frames(0.25, seed=1)[1] != executed
+
+
+def test_sticky_actions_validated():
+    with pytest.raises(ValueError):
+        AtariPreprocessing(FakeAtari(), sticky_actions=1.5)
 
 
 def _image_episode(learner_policy, agents):
@@ -142,3 +181,21 @@ def test_space_invaders_preset():
                       record=True)
     assert ep.length == 50 and ep.truncated
     assert ep.trajectories['first_0'][0].obs.dtype == np.uint8
+
+
+@pytest.mark.skipif(not _has_space_invaders(), reason='Atari ROMs not installed')
+def test_space_invaders_is_stochastic_with_sticky_actions():
+    """The same deterministic action sequence must not replay the same game."""
+    env = make_env(parse_env('space_invaders'))
+    assert env.sticky_actions == 0.25
+
+    def last_frame(seed):
+        env.reset(seed=seed)
+        for t in range(150):
+            ts = env.step({a: (t // 3) % 6 for a in env.spec.agents})
+            if ts.done:
+                break
+        return ts.observations['first_0'][-1]
+
+    assert (last_frame(0) == last_frame(0)).all()        # reproducible from the seed
+    assert any((last_frame(0) != last_frame(s)).any() for s in (1, 2, 3))
