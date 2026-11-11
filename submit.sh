@@ -13,7 +13,7 @@
 #
 #   bash submit.sh --account def-yourpi --exp-name kuhn_br --method psro \
 #       --env kuhn_poker --budget 100000000 --seeds 0,1,2,3,4 \
-#       --psro-oracle br --eval-metrics nash_conv
+#       --psro-oracle br
 #
 # Before submitting, on the login node, it builds the environment once
 # (catches missing packages or Atari ROMs now, not after hours in the queue)

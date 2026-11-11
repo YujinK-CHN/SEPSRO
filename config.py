@@ -116,11 +116,14 @@ def parse_env(value):
 # line, and recorded in config.json under 'env_overrides'.
 # --------------------------------------------------------------------------- #
 ENV_OVERRIDES = {
-    # Poker: the methods' published settings. Only the post-hoc approximate
-    # NashConv (a check against the exact one there) needs more evaluation
-    # episodes: NashConv is ~0.01-0.3 while returns vary by ~1 per episode.
-    'kuhn_poker': {'exploit_eval_episodes': 20_000},
-    'leduc_poker': {'exploit_eval_episodes': 20_000},
+    # Poker: the methods' published settings. Exact NashConv (the headline) is
+    # logged at every evaluation point. Only the post-hoc approximate NashConv
+    # (a check against the exact one there) needs more evaluation episodes:
+    # NashConv is ~0.01-0.3 while returns vary by ~1 per episode.
+    'kuhn_poker': {'eval_metrics': ['nash_conv', 'vs_random', 'self_play'],
+                   'exploit_eval_episodes': 20_000},
+    'leduc_poker': {'eval_metrics': ['nash_conv', 'vs_random', 'self_play'],
+                    'exploit_eval_episodes': 20_000},
     'space_invaders': {
         # evaluation: 20 points x 100 episodes per metric (~1.5 h of a ~20 h run)
         'eval_episodes': 100,

@@ -140,6 +140,13 @@ def test_env_overrides_apply_unless_explicit():
     assert args.env_overrides == ENV_OVERRIDES['kuhn_poker']
 
 
+def test_poker_logs_exact_nash_conv_by_default():
+    for env in ('kuhn_poker', 'leduc_poker'):
+        assert parse_args(['--env', env]).eval_metrics == ['nash_conv', 'vs_random', 'self_play']
+    assert parse_args(['--env', 'kuhn_poker', '--eval-metrics', 'vs_random']).eval_metrics == ['vs_random']
+    assert parse_args(['--env', 'space_invaders']).eval_metrics == ['vs_random', 'self_play']
+
+
 def test_every_override_names_a_real_setting():
     for env in ENV_OVERRIDES:
         parse_args(['--env', env])   # raises on an unknown key

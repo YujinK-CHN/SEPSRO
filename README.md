@@ -61,14 +61,14 @@ run of the experiment (one task); see [Experiment protocol](#experiment-protocol
 python main.py --method random --env kuhn_poker --budget 100000 --seed 0
 
 # PSRO as in psro_v2_example.py, with its three oracles
-python main.py --method psro --env kuhn_poker --psro-oracle br  --budget 100000000 --eval-metrics nash_conv
-python main.py --method psro --env kuhn_poker --psro-oracle pg  --budget 100000000 --eval-metrics nash_conv
-python main.py --method psro --env kuhn_poker --psro-oracle dqn --budget 100000000 --eval-metrics nash_conv
+python main.py --method psro --env kuhn_poker --psro-oracle br  --budget 100000000
+python main.py --method psro --env kuhn_poker --psro-oracle pg  --budget 100000000
+python main.py --method psro --env kuhn_poker --psro-oracle dqn --budget 100000000
 
 bash run.sh --method psro --env leduc_poker --budget 100000000 --seeds 0,1,2
 
 # GEMS with the paper's defaults (no iteration cap: it runs until the budget is spent)
-python main.py --method gems --env kuhn_poker --budget 100000000 --eval-metrics nash_conv
+python main.py --method gems --env kuhn_poker --budget 100000000
 python main.py --method gems --env connect_four --budget 100000000
 
 # post-hoc metrics on finished runs
@@ -77,7 +77,8 @@ python posthoc.py crossplay results/main/space_invaders
 ```
 
 `--eval-metrics nash_conv` gives exact NashConv on OpenSpiel turn-based games
-and on the native matrix games. PettingZoo games have no exact equivalent; use
+and on the native matrix games; on Kuhn and Leduc it is on by default
+(`nash_conv vs_random self_play`, from `config.ENV_OVERRIDES`). PettingZoo games have no exact equivalent; use
 `vs_random` / `self_play` there.
 
 Output goes to `results/<exp-name>/<env>/<method>/seed<seed>/`:
@@ -278,7 +279,7 @@ is a single Slurm job.
 
 | | Kuhn, Leduc | Space Invaders |
 |---|---|---|
-| headline | exact NashConv (`--eval-metrics nash_conv`), the full curve | approximate NashConv at the end (`posthoc.py exploit`) |
+| headline | exact NashConv (on by default for Kuhn and Leduc), the full curve | approximate NashConv at the end (`posthoc.py exploit`) |
 | secondary | -- | cross-play (`posthoc.py crossplay`) |
 | learning curves | NashConv | `vs_random`, `self_play` |
 
