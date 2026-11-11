@@ -91,7 +91,8 @@ def test_methods_scored_at_fixed_points_and_stop_exactly(tmp_path, method):
     for stream in (records, train):
         assert all('wall_time' in r and 'elapsed_s' in r for r in stream)
         assert [r['elapsed_s'] for r in stream] == sorted(r['elapsed_s'] for r in stream)
-    policies = main.load_policies(run_dir / 'final_policies.pkl')
+    policies = main.load_policies(tmp_path / 'checkpoints' / 'check' / 'rps' / method / 'seed0'
+                                  / 'final.pkl')
     assert set(policies) == {'player_0', 'player_1'}
     rng = np.random.default_rng(0)
     for policy in policies.values():
@@ -153,15 +154,22 @@ def test_every_override_names_a_real_setting():
 
 
 # ---------------------------------------------------------------- posthoc
-def _fake_run(path, actions, method='fixed', seed=0):
-    """A run directory on RPS whose final policies always play `actions` (one per seat)."""
+def _fake_run(path, actions, method='fixed', seed=0, steps=()):
+    """A run on RPS (budget 100) whose saved policies always play `actions` (one per seat).
+
+    The checkpoints (final.pkl, and step_<N>.pkl for N in `steps`) go to a
+    separate directory, as main.py writes them.
+    """
     path.mkdir(parents=True)
+    ckpt_dir = path.parent / f'{path.name}_checkpoints'
+    ckpt_dir.mkdir()
     (path / 'config.json').write_text(json.dumps({
-        'env': 'rps', 'seed': seed, 'method': method, 'exp_name': 'test', 'budget': 1,
-        'max_episode_steps': None, 'obs_type': 'info_state'}))
+        'env': 'rps', 'seed': seed, 'method': method, 'exp_name': 'test', 'budget': 100,
+        'max_episode_steps': None, 'obs_type': 'info_state', 'checkpoint_dir': str(ckpt_dir)}))
     policies = {f'player_{i}': FixedActionPolicy(a) for i, a in enumerate(actions)}
-    with open(path / 'final_policies.pkl', 'wb') as handle:
-        pickle.dump(policies, handle)
+    for name in ['final'] + [f'step_{n}' for n in steps]:
+        with open(ckpt_dir / f'{name}.pkl', 'wb') as handle:
+            pickle.dump(policies, handle)
     return path
 
 
@@ -170,15 +178,77 @@ def test_exploit_recovers_exact_nash_conv(tmp_path):
     pytest.importorskip('torch')
     import posthoc
     run = _fake_run(tmp_path / 'rock', [0, 0])
-    result = posthoc.exploit(str(run), ['--exploit-steps', '4000',
-                                        '--exploit-eval-episodes', '200',
-                                        '--ppo-rollout-steps', '256', '--ppo-lr', '1e-2'])
+    [result] = posthoc.exploit(str(run), ['--exploit-steps', '4000',
+                                          '--exploit-eval-episodes', '200',
+                                          '--ppo-rollout-steps', '256', '--ppo-lr', '1e-2'])
     assert result['exact_nash_conv'] == pytest.approx(2.0)
     assert result['approx_nash_conv'] > 1.6, result['approx_nash_conv']
-    saved = json.loads((run / 'exploit.json').read_text())
+    saved = json.loads((run / 'exploit' / 'final.json').read_text())
     assert set(saved['seats']) == {'player_0', 'player_1'}
+    assert saved['checkpoint'] == 'final' and saved['budget_used'] == 100
     with pytest.raises(SystemExit):              # no silent overwrite
         posthoc.exploit(str(run), ['--exploit-steps', '10'])
+
+
+def test_checkpoint_selection():
+    import posthoc
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        run = _fake_run(Path(tmp) / 'run', [0, 0], steps=(0, 26, 50, 77))
+        cfg = json.loads((run / 'config.json').read_text())
+        pick = lambda which: [name for _, name in posthoc.select_checkpoints(cfg, which)]
+        assert pick('final') == ['final'] and pick('step_26') == ['step_26']
+        assert pick('all') == ['step_0', 'step_26', 'step_50', 'step_77', 'final']
+        # Fractions of the budget (100): the nearest checkpoint; 1 is the final one.
+        assert pick('0,0.25,0.5,0.75,1') == ['step_0', 'step_26', 'step_50', 'step_77', 'final']
+        assert pick('0.5,step_50') == ['step_50']          # no duplicates
+        for bad in ('step_3', '1.5', 'latest'):
+            with pytest.raises(SystemExit):
+                pick(bad)
+
+
+def test_exploit_scores_several_checkpoints_and_plot_draws_them(tmp_path):
+    pytest.importorskip('torch')
+    import plot_results
+    import posthoc
+    run = _fake_run(tmp_path / 'test' / 'rps' / 'fixed' / 'seed0', [0, 0], steps=(0, 50))
+    (run / 'eval.jsonl').write_text(json.dumps({'method': 'fixed', 'env': 'rps', 'seed': 0,
+                                                'budget': 100, 'budget_used': 0,
+                                                'vs_random/mean': 0.0}) + '\n')
+    argv = ['--exploit-steps', '300', '--exploit-eval-episodes', '20', '--ppo-rollout-steps', '64']
+    results = posthoc.exploit(str(run), argv, '0,0.5,1')
+    assert [r['budget_used'] for r in results] == [0, 50, 100]
+    assert sorted(os.listdir(run / 'exploit')) == ['final.json', 'step_0.json', 'step_50.json']
+    with pytest.raises(SystemExit):               # any already-scored one stops it
+        posthoc.exploit(str(run), argv, 'step_50')
+    loaded = plot_results.load_run(str(run))
+    assert 'approx_nash_conv' in loaded['metrics']
+    assert plot_results.default_metric([loaded]) == 'approx_nash_conv'
+    xs, centre, *_ = plot_results.aggregate([loaded], 'approx_nash_conv')
+    assert list(xs) == [0, 50, 100]
+    assert list(centre) == pytest.approx([r['approx_nash_conv'] for r in results])
+
+
+def test_checkpoint_every_and_root(tmp_path):
+    import main
+    main.main(['--method', 'random', '--env', 'rps', '--budget', '100', '--eval-interval', '10',
+               '--eval-episodes', '2', '--results-dir', str(tmp_path / 'stats'),
+               '--checkpoint-root', str(tmp_path / 'policies'), '--checkpoint-every', '3'])
+    ckpt_dir = tmp_path / 'policies' / 'check' / 'rps' / 'random' / 'seed0'
+    assert sorted(p.stem for p in ckpt_dir.glob('*.pkl')) == sorted(
+        ['step_0', 'step_30', 'step_60', 'step_90', 'final'])
+    assert not list((tmp_path / 'stats').rglob('*.pkl'))
+    # A re-run refuses while old checkpoints are there, and --overwrite clears them.
+    argv = ['--method', 'random', '--env', 'rps', '--budget', '100', '--eval-interval', '10',
+            '--eval-episodes', '2', '--results-dir', str(tmp_path / 'stats'),
+            '--checkpoint-root', str(tmp_path / 'policies'), '--checkpoint-every', '0']
+    (tmp_path / 'stats' / 'check' / 'rps' / 'random' / 'seed0' / 'eval.jsonl').unlink()
+    (tmp_path / 'stats' / 'check' / 'rps' / 'random' / 'seed0' / 'train.jsonl').unlink()
+    with pytest.raises(SystemExit):
+        main.main(argv)
+    main.main(argv + ['--overwrite'])
+    assert [p.stem for p in ckpt_dir.glob('*.pkl')] == ['final']
 
 
 def test_crossplay_known_payoffs(tmp_path):
@@ -213,3 +283,35 @@ def test_gems_prints_progress(tmp_path, capsys):
     for name in ('eval.jsonl', 'train.jsonl'):
         on, off = (strip(tmp_path / x / 'check' / 'rps' / 'gems' / 'seed0' / name) for x in ('on', 'off'))
         assert on == off
+
+
+class _NetPolicy(FixedActionPolicy):
+    """A policy holding a network, as PSRO's and GEMS's do (module level: picklable)."""
+
+    def __init__(self, seed):
+        import torch
+        super().__init__(0)
+        torch.manual_seed(seed)
+        self.net = torch.nn.Linear(4, 3)
+
+
+def test_checkpoints_store_each_network_once(tmp_path):
+    torch = pytest.importorskip('torch')
+    from sepsro.checkpoints import OBJECTS_DIR, load_policies, save_policies
+    from sepsro.policies import MixturePolicy
+    Net = _NetPolicy
+
+    a, b = Net(0), Net(1)
+    save_policies({'p0': MixturePolicy([a, a], np.ones(2) / 2)}, str(tmp_path / 'step_0.pkl'))
+    save_policies({'p0': MixturePolicy([a, b], np.ones(2) / 2)}, str(tmp_path / 'step_1.pkl'))
+    objects = tmp_path / OBJECTS_DIR
+    assert len(list(objects.iterdir())) == 2          # a once (twice used, two files), b once
+    with torch.no_grad():
+        a.net.weight.add_(1.0)                        # a changes: a new object, old one kept
+    save_policies({'p0': MixturePolicy([a, b], np.ones(2) / 2)}, str(tmp_path / 'final.pkl'))
+    assert len(list(objects.iterdir())) == 3
+    first = load_policies(str(tmp_path / 'step_0.pkl'))['p0']
+    assert first.policies[0].net is first.policies[1].net   # shared stays shared
+    old = load_policies(str(tmp_path / 'step_1.pkl'))['p0'].policies[0].net
+    new = load_policies(str(tmp_path / 'final.pkl'))['p0'].policies[0].net
+    assert torch.allclose(new.weight, old.weight + 1.0)

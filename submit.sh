@@ -23,12 +23,20 @@
 # --task picks what the jobs run (default train):
 #   train      main.py, one array task per (method, seed)
 #   exploit    posthoc.py exploit on those finished runs: approximate NashConv,
-#              one array task per (method, seed); needs their final_policies.pkl
+#              one array task per (method, seed, checkpoint); --checkpoints picks
+#              the checkpoints (default final; e.g. 0,0.25,0.5,0.75,1 for a
+#              5-point curve: fractions of the budget; 'all' = every checkpoint
+#              of a run in one task). Needs the runs' checkpoints.
 #   crossplay  posthoc.py crossplay over every finished run of --exp-name / --env:
 #              one task (the matrix covers all runs found; --method only names the job)
 #
 #   bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
-#       --env space_invaders --seeds 0,1,2,3,4 --task exploit --time 12:00:00
+#       --env space_invaders --seeds 0,1,2,3,4 --task exploit --time 12:00:00 \
+#       --checkpoints 0,0.25,0.5,0.75,1
+#
+# Statistics (logs, exploit and cross-play results) go to <out-root>/<exp-name>/,
+# policy checkpoints to <out-root>/checkpoints/<exp-name>/ (or --checkpoint-root),
+# so the statistics can be copied back without the policies.
 #
 # Resources default to CPU-only: SEPSRO's learners run on CPU (rollouts are one
 # step at a time), so a GPU would sit idle. --gpus 1 requests one per task.
@@ -44,6 +52,8 @@
 #   --out-root  (or $SEPSRO_OUT)       default <repo>/results; ~/scratch/... for big sweeps
 #   --python-module                    default python/3.11 (must match setup_cluster.sh)
 #   --task      train | exploit | crossplay   (see above)
+#   --checkpoints  with --task exploit: final (default), all, step_<N> or
+#               fractions of the budget, comma-separated; one task each
 #   --dry-run                          write and print the job script, submit nothing
 set -euo pipefail
 
@@ -59,6 +69,7 @@ OUT_ROOT="${SEPSRO_OUT:-$REPO/results}"
 PYTHON_MODULE="${SEPSRO_PYTHON_MODULE:-python/3.11}"
 DRY_RUN=0
 TASK=train
+CHECKPOINTS=final
 
 METHODS=()
 ENV_NAME="kuhn_poker"
@@ -81,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --python-module) PYTHON_MODULE="$2"; shift 2;;
     --dry-run)  DRY_RUN=1;     shift;;
     --task)     TASK="$2";     shift 2;;
+    --checkpoints) CHECKPOINTS="$2"; shift 2;;
     --method)   METHODS+=("$2"); shift 2;;
     --env)      ENV_NAME="$2"; shift 2;;
     --budget)   BUDGET="$2";   shift 2;;
@@ -103,11 +115,15 @@ if [[ -z "$ACCOUNT" && $DRY_RUN -eq 0 ]]; then
 fi
 
 IFS=',' read -ra SEED_LIST <<< "$SEEDS"
-TASKS=()                                   # "method seed" per array index
+CKPT_LIST=(final)
+[[ "$TASK" == exploit ]] && IFS=',' read -ra CKPT_LIST <<< "$CHECKPOINTS"
+TASKS=()                                   # "method seed checkpoint" per array index
 for m in "${METHODS[@]}"; do
-  for s in "${SEED_LIST[@]}"; do TASKS+=("$m $s"); done
+  for s in "${SEED_LIST[@]}"; do
+    for c in "${CKPT_LIST[@]}"; do TASKS+=("$m $s $c"); done
+  done
 done
-[[ "$TASK" == crossplay ]] && TASKS=("all 0")   # one job over every finished run
+[[ "$TASK" == crossplay ]] && TASKS=("all 0 final")   # one job over every finished run
 N_TASKS=${#TASKS[@]}
 
 # ---- checks on the login node, where failures are cheap -------------------- #
@@ -142,8 +158,8 @@ print(f'[submit] env ok: {spec.backend}, agents {list(spec.agents)}, obs {dict(s
 
 env_dir = os.path.join(out_root, exp, preset['name'])
 if task == 'crossplay':
-    import glob
-    found = glob.glob(os.path.join(env_dir, '**', 'final_policies.pkl'), recursive=True)
+    from posthoc import find_finished_runs
+    found = find_finished_runs([env_dir])
     if len(found) < 2:
         sys.exit(f'[submit] cross-play needs at least two finished runs under {env_dir}; '
                  f'found {len(found)}.')
@@ -152,17 +168,24 @@ if task == 'crossplay':
 
 problems = []
 for item in tasks:
-    method, seed = item.split()
+    method, seed, which = item.split()
     run_dir = os.path.join(env_dir, method, f'seed{seed}')
     if task == 'train':
         if any(os.path.exists(os.path.join(run_dir, f)) for f in ('eval.jsonl', 'train.jsonl')):
             problems.append(run_dir)
-    elif not os.path.exists(os.path.join(run_dir, 'final_policies.pkl')):
-        sys.exit(f'[submit] {run_dir} has no final_policies.pkl: train it first.')
-    elif os.path.exists(os.path.join(run_dir, 'exploit.json')):
-        problems.append(run_dir)
+        continue
+    import json
+    from posthoc import exploit_path, select_checkpoints
+    try:
+        with open(os.path.join(run_dir, 'config.json'), encoding='utf-8') as handle:
+            cfg = json.load(handle)
+    except OSError:
+        sys.exit(f'[submit] {run_dir} has no config.json: train it first.')
+    for step, name in select_checkpoints(cfg, which):   # exits on a missing checkpoint
+        if os.path.exists(exploit_path(run_dir, name)):
+            problems.append(exploit_path(run_dir, name))
 if problems and not overwrite:
-    what = 'logs' if task == 'train' else 'an exploit.json'
+    what = 'logs' if task == 'train' else 'exploit results'
     sys.exit(f'[submit] these runs already have {what} (use another --exp-name, or --overwrite):\n  '
              + '\n  '.join(problems))
 PYEOF
@@ -190,7 +213,7 @@ RUN_DIR="$(q "$OUT_ROOT/$EXP_NAME/$ENV_DIR_NAME")"
 case "$TASK" in
   train)     COMMAND="python main.py --method \"\$METHOD\" --seed \"\$SEED\" --env $(q "$ENV_NAME") --budget $(q "$BUDGET") \\
     --exp-name $(q "$EXP_NAME") --results-dir $(q "$OUT_ROOT")${MAIN_ARGS}";;
-  exploit)   COMMAND="python posthoc.py exploit ${RUN_DIR}/\$METHOD/seed\$SEED${MAIN_ARGS}";;
+  exploit)   COMMAND="python posthoc.py exploit ${RUN_DIR}/\$METHOD/seed\$SEED --checkpoint \"\$CKPT\"${MAIN_ARGS}";;
   crossplay) COMMAND="python posthoc.py crossplay ${RUN_DIR}${MAIN_ARGS}";;
 esac
 if [[ "$GPUS" != "0" ]]; then
@@ -211,7 +234,7 @@ ${GRES_LINE}
 set -euo pipefail
 TASKS=(
 ${TASK_LINES})
-read -r METHOD SEED <<< "\${TASKS[\$SLURM_ARRAY_TASK_ID]}"
+read -r METHOD SEED CKPT <<< "\${TASKS[\$SLURM_ARRAY_TASK_ID]}"
 
 module load ${PYTHON_MODULE}
 source $(q "$VENV")/bin/activate
@@ -219,7 +242,7 @@ cd $(q "$REPO")
 # Torch and NumPy otherwise size their thread pools to the whole node.
 export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1}
 
-echo "task    : \$SLURM_ARRAY_TASK_ID  method=\$METHOD seed=\$SEED  on \$(hostname)"
+echo "task    : \$SLURM_ARRAY_TASK_ID  method=\$METHOD seed=\$SEED checkpoint=\$CKPT  on \$(hostname)"
 echo "commit  : \$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "started : \$(date)"
 

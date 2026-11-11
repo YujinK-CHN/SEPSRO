@@ -3,7 +3,9 @@ Plot runs on the shared budget axis.
 
 Reads every eval.jsonl under a results directory, groups runs into series,
 aggregates across seeds, and draws them against env steps spent -- the common
-currency that makes methods comparable.
+currency that makes methods comparable. Results of posthoc.py exploit
+(<run>/exploit/*.json) join the run as the metric approx_nash_conv, one point
+per scored checkpoint, so scoring several checkpoints gives a curve.
 
     python plot_results.py results/main
     python plot_results.py results/main --metric vs_random/mean --metric self_play/first_0
@@ -54,6 +56,7 @@ THEME = {
 
 METRIC_LABELS = {
     'nash_conv': 'NashConv  (lower is better)',
+    'approx_nash_conv': 'Approximate NashConv  (lower is better)',
     'exploitability': 'Exploitability  (lower is better)',
     'vs_random/mean': 'Return vs random opponents  (mean over seats)',
     'self_play/mean': 'Return in self-play  (mean over seats)',
@@ -62,7 +65,8 @@ METRIC_LABELS = {
 # Numeric fields of an eval record that are not metrics.
 NOT_METRICS = {'seed', 'budget', 'budget_used', 'budget_fraction', 'elapsed_s'}
 # Fields that never distinguish one arm from another.
-NOT_SERIES = {'seed', 'final', 'budget_used', 'budget_fraction', 'wall_time', 'elapsed_s'}
+NOT_SERIES = {'seed', 'final', 'budget_used', 'budget_fraction', 'wall_time', 'elapsed_s',
+              'checkpoint'}
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +102,23 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def read_exploit(run_dir):
+    """posthoc.py exploit results of a run as {budget_used, approx_nash_conv} records."""
+    directory = os.path.join(run_dir, 'exploit')
+    records = []
+    for f in sorted(os.listdir(directory)) if os.path.isdir(directory) else ():
+        if not f.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(directory, f), encoding='utf-8') as handle:
+                result = json.load(handle)
+            records.append({'budget_used': result['budget_used'],
+                            'approx_nash_conv': result['approx_nash_conv']})
+        except (OSError, ValueError, KeyError):
+            pass
+    return sorted(records, key=lambda r: r['budget_used'])
+
+
 def load_run(run_dir):
     evals = read_jsonl(os.path.join(run_dir, 'eval.jsonl'))
     if not evals:
@@ -114,6 +135,10 @@ def load_run(run_dir):
             r['self_play/mean'] = float(np.mean(seats))
     if any('self_play/mean' in r for r in evals):
         metrics = sorted(set(metrics) | {'self_play/mean'})
+    exploit = read_exploit(run_dir)
+    if exploit:   # points of their own: the metric exists only at scored checkpoints
+        evals = evals + exploit
+        metrics = sorted(set(metrics) | {'approx_nash_conv'})
     return {'dir': run_dir, 'arm': arm, 'seed': first.get('seed'), 'evals': evals,
             'train': read_jsonl(os.path.join(run_dir, 'train.jsonl')), 'metrics': metrics}
 
@@ -346,7 +371,7 @@ def render_train(per_series, out_path, mode='light'):
 
 def default_metric(runs):
     available = {m for r in runs for m in r['metrics']}
-    for metric in ('nash_conv', 'vs_random/mean', 'self_play/mean'):
+    for metric in ('nash_conv', 'approx_nash_conv', 'vs_random/mean', 'self_play/mean'):
         if metric in available:
             return metric
     return sorted(available)[0]

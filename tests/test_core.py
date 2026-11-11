@@ -192,7 +192,13 @@ def test_main_random_end_to_end(tmp_path):
     assert records[-1]['final'] and records[-1]['budget_used'] == 300   # hard stop
     # Before training, every --eval-interval (300 / 20 = 15) steps, and at the end.
     assert [r['budget_used'] for r in records] == list(range(0, 300, 15)) + [300]
-    assert (run_dir / 'final_policies.pkl').exists()
+    # Policies go to their own tree; the statistics directory holds none.
+    ckpt_dir = tmp_path / 'checkpoints' / 'check' / env / 'random' / 'seed0'
+    assert (ckpt_dir / 'final.pkl').exists()
+    assert not list(run_dir.glob('*.pkl'))
+    names = [r.get('checkpoint') for r in records]
+    assert names == [f'step_{r["budget_used"]}' for r in records[:-1]] + ['final']
+    assert sorted(p.stem for p in ckpt_dir.glob('*.pkl')) == sorted(names)
     assert {'method', 'env', 'seed', 'vs_random/mean'} <= set(records[-1])
     assert (run_dir / 'config.json').exists()
 

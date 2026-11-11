@@ -1,8 +1,12 @@
 """
-Post-hoc metrics on finished runs, from the final_policies.pkl main.py saves.
+Post-hoc metrics on finished runs, from the policy checkpoints main.py saves.
 
-    python posthoc.py exploit   <run_dir> [config flags]
+    python posthoc.py exploit   <run_dir> [--checkpoint WHICH] [config flags]
     python posthoc.py crossplay <dir> [<dir> ...] [--episodes N] [--out file.json]
+
+<run_dir> is the run's statistics directory (results/<exp>/<env>/<method>/
+seed<N>); its config.json says where the checkpoints are. Results are written
+there, never next to the checkpoints, so copying the statistics tree is enough.
 
 exploit -- approximate NashConv (the paper's Atari metric; Timbers et al., 2022)
     For each seat i, a FRESH PPO learner trains a best response BR_i against
@@ -18,10 +22,20 @@ exploit -- approximate NashConv (the paper's Atari metric; Timbers et al., 2022)
     is a LOWER bound on the true NashConv: an RL best response can be weaker
     than the exact one, and a gain can even come out negative. On OpenSpiel
     and native games the exact NashConv is written alongside, which checks the
-    protocol. Output: <run_dir>/exploit.json.
+    protocol.
+
+    --checkpoint picks which saved policy is scored (default final):
+        final            the policy of the final evaluation
+        step_<N>         the one saved at env step N
+        <fraction>       e.g. 0.25: the checkpoint nearest that fraction of
+                         the budget (0 = before training, 1 = final), so every
+                         run is scored at the same points of its budget
+        all              every checkpoint, one after the other
+    and a comma list of these. A curve over training = several checkpoints.
+    Output: <run_dir>/exploit/<checkpoint>.json, with the checkpoint's env step.
 
 crossplay -- returns against co-players never trained with (two-player games)
-    Every run's final seat-0 policy plays every run's final seat-1 policy for
+    Every run's final (final.pkl) seat-0 policy plays every run's final seat-1 policy for
     --episodes episodes. For each run: the mean return of its seat 0 against
     the OTHER runs' seat 1, of its seat 1 against the other runs' seat 0, and
     their mean; then mean and std over the runs of each method. Output: the
@@ -43,7 +57,7 @@ import time
 import numpy as np
 
 from config import parse_args, parse_env
-from main import load_policies
+from main import FINAL_CHECKPOINT, checkpoint_path, load_policies
 from sepsro.budget import BudgetTracker
 from sepsro.envs import make_env
 from sepsro.rollout import play_episode
@@ -52,6 +66,50 @@ from sepsro.rollout import play_episode
 def _read_config(run_dir):
     with open(os.path.join(run_dir, 'config.json'), encoding='utf-8') as handle:
         return json.load(handle)
+
+
+def checkpoints(cfg):
+    """[(env step, name)] of a run's saved policies, in training order."""
+    directory = cfg['checkpoint_dir']
+    found = []
+    for f in os.listdir(directory) if os.path.isdir(directory) else ():
+        name, ext = os.path.splitext(f)
+        if ext != '.pkl':
+            continue
+        if name == FINAL_CHECKPOINT:
+            found.append((int(cfg['budget']), name))
+        elif name.startswith('step_') and name[5:].isdigit():
+            found.append((int(name[5:]), name))
+    return sorted(found, key=lambda item: (item[0], item[1] == FINAL_CHECKPOINT))
+
+
+def select_checkpoints(cfg, which):
+    """--checkpoint (final | step_<N> | fraction | all, or a comma list) -> [(step, name)]."""
+    saved = checkpoints(cfg)
+    if not saved:
+        raise SystemExit(f'No checkpoints in {cfg["checkpoint_dir"]}: train the run first.')
+    by_name = {name: step for step, name in saved}
+    chosen = []
+    for item in str(which).split(','):
+        item = item.strip()
+        if item == 'all':
+            chosen += saved
+        elif item in by_name:
+            chosen.append((by_name[item], item))
+        else:
+            try:
+                fraction = float(item)
+            except ValueError:
+                raise SystemExit(f'Unknown checkpoint {item!r}; saved: '
+                                 f'{", ".join(name for _, name in saved)}.') from None
+            if not 0.0 <= fraction <= 1.0:
+                raise SystemExit(f'A checkpoint fraction must be in [0, 1], got {item}.')
+            if fraction == 1.0 and FINAL_CHECKPOINT in by_name:
+                chosen.append((by_name[FINAL_CHECKPOINT], FINAL_CHECKPOINT))
+            else:
+                target = fraction * int(cfg['budget'])
+                chosen.append(min(saved, key=lambda c: abs(c[0] - target)))
+    return list(dict.fromkeys(chosen))
 
 
 def _env_for(cfg):
@@ -79,26 +137,37 @@ def _exact_nash_conv(env, policies, rng):
 
 
 # --------------------------------------------------------------------- exploit
-def exploit(run_dir, argv):
+def exploit_path(run_dir, name):
+    return os.path.join(run_dir, 'exploit', f'{name}.json')
+
+
+def exploit(run_dir, argv, checkpoint=FINAL_CHECKPOINT):
+    """Approximate NashConv of each selected checkpoint; returns the list of results."""
+    cfg = _read_config(run_dir)
+    # The run's env and seed, this protocol's settings (+ ENV_OVERRIDES, + flags).
+    args = parse_args(['--env', cfg['env'], '--seed', str(cfg['seed']), *argv])
+    chosen = select_checkpoints(cfg, checkpoint)
+    done = [exploit_path(run_dir, name) for _, name in chosen
+            if os.path.exists(exploit_path(run_dir, name))]
+    if done and not args.overwrite:
+        raise SystemExit(f'{", ".join(done)} exist(s). Use --overwrite to replace.')
+    return [_exploit_one(run_dir, cfg, args, step, name) for step, name in chosen]
+
+
+def _exploit_one(run_dir, cfg, args, step, name):
     import torch
 
     from sepsro.learners.ppo import PPOConfig, PPOLearner
 
-    cfg = _read_config(run_dir)
-    out_path = os.path.join(run_dir, 'exploit.json')
-    # The run's env and seed, this protocol's settings (+ ENV_OVERRIDES, + flags).
-    args = parse_args(['--env', cfg['env'], '--seed', str(cfg['seed']), *argv])
-    if os.path.exists(out_path) and not args.overwrite:
-        raise SystemExit(f'{out_path} exists. Use --overwrite to replace it.')
-
-    policies = load_policies(os.path.join(run_dir, 'final_policies.pkl'))
+    out_path = exploit_path(run_dir, name)
+    policies = load_policies(checkpoint_path(cfg['checkpoint_dir'], name))
     env = _env_for(cfg)
     agents = env.spec.agents
     rng = np.random.default_rng([cfg['seed'], 2])
     torch.manual_seed(cfg['seed'])
     ppo = PPOConfig.from_args(args)
-    print(f'[exploit] {run_dir}: {cfg["method"]} on {cfg["env"]}, '
-          f'{args.exploit_steps} PPO steps per seat', flush=True)
+    print(f'[exploit] {run_dir} checkpoint {name} (env step {step}): {cfg["method"]} on '
+          f'{cfg["env"]}, {args.exploit_steps} PPO steps per seat', flush=True)
 
     start = time.time()
     baseline = _returns(env, policies, rng, args.exploit_eval_episodes)
@@ -130,6 +199,7 @@ def exploit(run_dir, argv):
 
     result = {'run_dir': run_dir, 'method': cfg['method'], 'env': cfg['env'], 'seed': cfg['seed'],
               'exp_name': cfg.get('exp_name'), 'budget': cfg.get('budget'),
+              'checkpoint': name, 'budget_used': step,
               'approx_nash_conv': float(sum(s['gain'] for s in seats.values())),
               # Standard error from the evaluation episodes only (the best
               # response's own training randomness is not in it).
@@ -138,6 +208,7 @@ def exploit(run_dir, argv):
               'seats': seats, 'exploit_steps': args.exploit_steps,
               'eval_episodes': args.exploit_eval_episodes, 'ppo': vars(ppo),
               'seconds': time.time() - start}
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, 'w', encoding='utf-8') as handle:
         json.dump(result, handle, indent=2)
     exact = result['exact_nash_conv']
@@ -149,13 +220,28 @@ def exploit(run_dir, argv):
 
 
 # ------------------------------------------------------------------- crossplay
-def _find_runs(paths):
+def _has_final(run_dir):
+    try:
+        cfg = _read_config(run_dir)
+    except (OSError, ValueError):
+        return False
+    return 'checkpoint_dir' in cfg and os.path.exists(
+        checkpoint_path(cfg['checkpoint_dir'], FINAL_CHECKPOINT))
+
+
+def find_finished_runs(paths):
+    """Statistics directories (with config.json) under `paths` whose final.pkl exists."""
     runs = []
     for path in paths:
-        hits = ([path] if os.path.exists(os.path.join(path, 'final_policies.pkl')) else
-                sorted(os.path.dirname(f) for f in
-                       glob.glob(os.path.join(path, '**', 'final_policies.pkl'), recursive=True)))
-        runs += hits
+        candidates = ([path] if os.path.exists(os.path.join(path, 'config.json')) else
+                      sorted(os.path.dirname(f) for f in
+                             glob.glob(os.path.join(path, '**', 'config.json'), recursive=True)))
+        runs += [r for r in candidates if _has_final(r)]
+    return runs
+
+
+def _find_runs(paths):
+    runs = find_finished_runs(paths)
     if len(runs) < 2:
         raise SystemExit(f'Cross-play needs at least two finished runs; found {len(runs)} in {paths}.')
     return runs
@@ -171,7 +257,8 @@ def crossplay(paths, episodes, out=None):
     if env.spec.num_agents != 2:
         raise SystemExit('Cross-play is defined here for two-player games.')
     seat0, seat1 = env.spec.agents
-    policies = [load_policies(os.path.join(r, 'final_policies.pkl')) for r in runs]
+    policies = [load_policies(checkpoint_path(c['checkpoint_dir'], FINAL_CHECKPOINT))
+                for c in configs]
     root = os.path.commonpath(runs)
     several_exps = len({c.get('exp_name') for c in configs}) > 1
     labels = [(f'{c.get("exp_name")}/' if several_exps else '') + f'{c["method"]}/seed{c["seed"]}'
@@ -228,8 +315,20 @@ def main(argv=None):
         raise SystemExit(2)
     if argv[0] == 'exploit':
         if len(argv) < 2:
-            raise SystemExit('usage: python posthoc.py exploit <run_dir> [config flags]')
-        return exploit(argv[1], argv[2:])
+            raise SystemExit('usage: python posthoc.py exploit <run_dir> [--checkpoint WHICH] '
+                             '[config flags]')
+        rest, which = [], FINAL_CHECKPOINT
+        tail = iter(argv[2:])
+        for a in tail:
+            if a == '--checkpoint':
+                which = next(tail, None)
+                if which is None:
+                    raise SystemExit('--checkpoint needs a value.')
+            elif a.startswith('--checkpoint='):
+                which = a.split('=', 1)[1]
+            else:
+                rest.append(a)
+        return exploit(argv[1], rest, which)
     parser = argparse.ArgumentParser(prog='posthoc.py crossplay')
     parser.add_argument('paths', nargs='+', help='Run directories, or directories holding runs.')
     parser.add_argument('--episodes', type=int, default=100, help='Episodes per pairing.')

@@ -46,7 +46,8 @@ def vs_random(env, policies, rng, episodes):
 
 class Evaluator:
 
-    def __init__(self, env_fn, budget, logger, metrics, interval, episodes, seed):
+    def __init__(self, env_fn, budget, logger, metrics, interval, episodes, seed,
+                 checkpoint=None):
         for name in metrics:
             METRICS.get(name)   # fail at start-up, not at the first watermark
         self.env = env_fn()
@@ -59,6 +60,8 @@ class Evaluator:
         # changes what a method trains on.
         self.rng = np.random.default_rng([seed, 1])
         self.method = None
+        # checkpoint(policies, final) -> name of the saved file, or None
+        self.checkpoint = checkpoint
 
     def start(self, method):
         """Score the untrained method now, and at every --eval-interval env steps from here on."""
@@ -70,6 +73,10 @@ class Evaluator:
         policies = method.policies()
         record = {'budget_used': self.budget.used, 'budget_fraction': self.budget.fraction,
                   'final': final}
+        if self.checkpoint is not None:
+            saved = self.checkpoint(policies, final)
+            if saved:
+                record['checkpoint'] = saved
         for name in self.metrics:
             record.update(METRICS.get(name)(self.env, policies, self.rng, self.episodes))
         self.logger.eval(record)

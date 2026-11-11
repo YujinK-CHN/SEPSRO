@@ -164,6 +164,14 @@ def _add_run_config(parser):
     group.add_argument('--exp-name', type=str, default='check',
                        help='Groups runs under results/<exp-name>/.')
     group.add_argument('--results-dir', type=str, default='results')
+    group.add_argument('--checkpoint-root', type=str, default=None,
+                       help='Where policy checkpoints go, as <root>/<exp-name>/<env>/<method>/'
+                            'seed<seed>/ -- a tree apart from the logs, so the statistics can '
+                            'be copied without the policies. Default <results-dir>/checkpoints.')
+    group.add_argument('--checkpoint-every', type=int, default=1,
+                       help='Save the evaluated policy at every N-th evaluation point (1 = all, '
+                            "0 = none); the final one is always saved. posthoc.py exploit "
+                            'scores them.')
     group.add_argument('--overwrite', action='store_true',
                        help='Replace the logs of an earlier run in the same run directory '
                             '(otherwise refused).')
@@ -435,8 +443,10 @@ def resolve(args):
             args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         except ImportError:
             args.device = 'cpu'
-    args.run_dir = os.path.join(args.results_dir, args.exp_name, args.env_name,
-                                args.method, f'seed{args.seed}')
+    run = (args.exp_name, args.env_name, args.method, f'seed{args.seed}')
+    args.run_dir = os.path.join(args.results_dir, *run)
+    root = args.checkpoint_root or os.path.join(args.results_dir, 'checkpoints')
+    args.checkpoint_dir = os.path.join(root, *run)
     return args
 
 

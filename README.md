@@ -52,8 +52,10 @@ env once on the login node and refuses run directories that already hold logs
 scripts go to `<out-root>/jobs/`, Slurm logs to `<out-root>/logs/`.
 
 `--task exploit` runs the approximate NashConv on finished runs (one task per
-method and seed), `--task crossplay` the cross-play matrix over every finished
-run of the experiment (one task); see [Experiment protocol](#experiment-protocol).
+method, seed and checkpoint: `--checkpoints final` by default, e.g.
+`--checkpoints 0,0.25,0.5,0.75,1` for a 5-point curve), `--task crossplay` the
+cross-play matrix over every finished run of the experiment (one task); see
+[Experiment protocol](#experiment-protocol).
 
 ## How to run
 
@@ -72,7 +74,8 @@ python main.py --method gems --env kuhn_poker --budget 100000000
 python main.py --method gems --env connect_four --budget 100000000
 
 # post-hoc metrics on finished runs
-python posthoc.py exploit results/main/space_invaders/gems/seed0
+python posthoc.py exploit results/main/space_invaders/gems/seed0                     # final policy
+python posthoc.py exploit results/main/space_invaders/gems/seed0 --checkpoint 0,0.5,1  # a curve
 python posthoc.py crossplay results/main/space_invaders
 ```
 
@@ -81,14 +84,22 @@ and on the native matrix games; on Kuhn and Leduc it is on by default
 (`nash_conv vs_random self_play`, from `config.ENV_OVERRIDES`). PettingZoo games have no exact equivalent; use
 `vs_random` / `self_play` there.
 
-Output goes to `results/<exp-name>/<env>/<method>/seed<seed>/`:
-`config.json` (every setting, including the per-env overrides applied),
-`eval.jsonl` (one record before training, one every `--eval-interval` env
-steps, one at the end; same schema for every method), `train.jsonl` (method
-internals: `psro_iteration` / `oracle_episode` records, `gems_iteration`
-records with meta-strategies, values, oracle picks and ABR losses), and
-`final_policies.pkl` (the final joint policy, for `posthoc.py`). The post-hoc
-tools add `exploit.json` to a run and `crossplay.json` to the env directory.
+Output goes to two trees with the same `<exp-name>/<env>/<method>/seed<seed>/`
+layout, so the statistics can be copied back without the (large) policies:
+
+| tree | holds |
+|---|---|
+| `results/` (the statistics) | `config.json` (every setting, including the per-env overrides applied); `eval.jsonl` (one record before training, one every `--eval-interval` env steps, one at the end; same schema for every method; each names the `checkpoint` it scored); `train.jsonl` (method internals: `psro_iteration` / `oracle_episode` records, `gems_iteration` records with meta-strategies, values, oracle picks and ABR losses); from `posthoc.py`, `exploit/<checkpoint>.json` per run and `crossplay.json` per env directory |
+| `results/checkpoints/` (`--checkpoint-root`) | the joint policy of each evaluation: `step_<N>.pkl` (env step N, every `--checkpoint-every`-th point; default 1 = all, 0 = none) and `final.pkl` (always), plus `objects/`, their networks |
+
+`posthoc.py` reads the checkpoints (the run's `config.json` names their
+directory) and writes only into the statistics tree. Each network is stored
+once in `objects/`, named by a hash of its contents (`sepsro/checkpoints.py`):
+a PSRO population member is written when it first appears, not again in every
+later checkpoint, and a GEMS generator once per iteration however many anchors
+use it. So a run's checkpoints cost about one copy of every network it ever
+committed; `step_<N>.pkl` files themselves are small. Copy the checkpoint
+directory whole (the `.pkl` files need `objects/`).
 
 Every record in both JSONL files carries `wall_time` and `elapsed_s`, and the
 `[eval]` lines in stdout are timestamped, so a run's speed can be read from
@@ -115,7 +126,7 @@ OpenSpiel games take parameters inline: `--env "openspiel:kuhn_poker(players=3)"
 
 ```bash
 python plot_results.py results/main --list-metrics          # arms, seeds, metrics found
-python plot_results.py results/main                         # nash_conv, else vs_random/mean
+python plot_results.py results/main                         # nash_conv, else approx_nash_conv, else vs_random/mean
 python plot_results.py results/main --metric vs_random/mean --metric self_play/mean --train
 python plot_results.py results --filter env=space_invaders --band minmax --out fig.pdf
 python plot_results.py results/main --table                 # the numbers instead of a figure
@@ -125,6 +136,9 @@ One series per arm (experiment, env, method and the method's variant fields
 from the eval records); seeds are averaged with a std / min-max / IQR band on
 the env-step axis, interpolated onto a shared grid where seeds' evaluation
 points differ. Legend names show only what differs between the plotted arms.
+Scored checkpoints (`exploit/*.json`) join their run as the metric
+`approx_nash_conv`, one point per checkpoint, so `posthoc.py exploit
+--checkpoint 0,0.25,0.5,0.75,1` on every run gives an approximate-NashConv curve.
 `--train` adds `<out>_train.png`: PSRO's best-response training return and
 GEMS's mixture value and chosen-candidate value per iteration and seat.
 Default output: `<root>/plot.png`.
@@ -279,7 +293,7 @@ is a single Slurm job.
 
 | | Kuhn, Leduc | Space Invaders |
 |---|---|---|
-| headline | exact NashConv (on by default for Kuhn and Leduc), the full curve | approximate NashConv at the end (`posthoc.py exploit`) |
+| headline | exact NashConv (on by default for Kuhn and Leduc), the full curve | approximate NashConv (`posthoc.py exploit`): at the end, or a curve over checkpoints |
 | secondary | -- | cross-play (`posthoc.py crossplay`) |
 | learning curves | NashConv | `vs_random`, `self_play` |
 
@@ -293,7 +307,7 @@ for training) trains a best response to
 the run's final policy of the other seat, and the gains in return over the
 final policy are summed. It is a lower bound (an RL best response can be
 weaker than the exact one) and is only comparable because every run gets the
-identical protocol; on Kuhn and Leduc `exploit.json` also holds the exact
+identical protocol; on Kuhn and Leduc `exploit/<checkpoint>.json` also holds the exact
 value, which checks the protocol. *Cross-play* pairs every run's seat-0 policy
 with every other run's seat-1 policy (all methods and seeds) and reports each
 run's mean return against co-players it never trained with.
@@ -330,9 +344,10 @@ main.py                   single entry point; builds shared pieces, runs --metho
 posthoc.py                approximate NashConv (PPO best responses) and cross-play on finished runs
 run.sh                    launcher over methods x seeds (local)
 setup_cluster.sh          one-time venv setup on an Alliance login node
-submit.sh                 Slurm job-array submission (one task per method x seed)
+submit.sh                 Slurm job-array submission (one task per method x seed [x checkpoint])
 plot_results.py           learning curves across arms and seeds (+ training diagnostics)
 sepsro/
+  checkpoints.py          policy checkpoints that store each network once (objects/<hash>.pkl)
   envs/
     base.py               MultiAgentEnv / EnvSpec / TimeStep -- the one interface
     openspiel_env.py      OpenSpiel adapter (sequential + simultaneous, chance resolved)
