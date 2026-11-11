@@ -53,6 +53,16 @@ def test_watermarks_fire_below_total():
     assert marks == [3, 6, 9]
 
 
+def test_several_watchers_fire_independently():
+    budget = BudgetTracker(10, hard=False)
+    evals, beats = [], []
+    budget.watch(5, evals.append)
+    budget.watch(2, beats.append)
+    budget.consume(7)
+    budget.consume(3)
+    assert evals == [5] and beats == [2, 4, 6, 8]
+
+
 # --------------------------------------------------------------- methods
 _TINY = {
     'psro': ['--psro-number-training-episodes', '200', '--psro-sims-per-entry', '20',
@@ -76,6 +86,11 @@ def test_methods_scored_at_fixed_points_and_stop_exactly(tmp_path, method):
     # Same x-positions for every method, whatever its iteration length.
     assert [r['budget_used'] for r in records] == list(range(0, 2000, 250)) + [2000]
     assert records[-1]['final'] and sum(r['final'] for r in records) == 1
+    # Wall-clock stamps on every record, of both streams, non-decreasing.
+    train = [json.loads(line) for line in (run_dir / 'train.jsonl').read_text().splitlines()]
+    for stream in (records, train):
+        assert all('wall_time' in r and 'elapsed_s' in r for r in stream)
+        assert [r['elapsed_s'] for r in stream] == sorted(r['elapsed_s'] for r in stream)
     policies = main.load_policies(run_dir / 'final_policies.pkl')
     assert set(policies) == {'player_0', 'player_1'}
     rng = np.random.default_rng(0)
@@ -168,3 +183,26 @@ def test_crossplay_known_payoffs(tmp_path):
     assert per_method['rock']['mean'] == -1.0 and per_method['paper']['mean'] == 1.0
     assert (tmp_path / 'crossplay.json').exists()
     assert all(r['self_play'] == [0.0, 0.0] for r in per_run.values())
+
+
+def test_gems_prints_progress(tmp_path, capsys):
+    """Phase lines and step heartbeats in stdout; they do not change the run."""
+    pytest.importorskip('torch')
+    import main
+    common = ['--method', 'gems', '--env', 'rps', '--budget', '600', '--eval-interval', '300',
+              '--eval-episodes', '5', *_TINY['gems']]
+    main.main([*common, '--results-dir', str(tmp_path / 'on'), '--gems-progress-interval', '100'])
+    out = capsys.readouterr().out
+    for phase in ('estimate/player_0', 'oracle/player_1', 'abr/player_0'):
+        assert f'] [gems] it 1 {phase}: ' in out
+    assert '] [gems] 100 steps: it ' in out and 'iteration 1 done at ' in out
+    main.main([*common, '--results-dir', str(tmp_path / 'off'), '--gems-progress-interval', '0'])
+    assert '[gems]' not in capsys.readouterr().out
+
+    def strip(path):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        return [{k: v for k, v in r.items() if k not in ('wall_time', 'elapsed_s', 'phase_seconds')}
+                for r in rows]
+    for name in ('eval.jsonl', 'train.jsonl'):
+        on, off = (strip(tmp_path / x / 'check' / 'rps' / 'gems' / 'seed0' / name) for x in ('on', 'off'))
+        assert on == off

@@ -60,9 +60,9 @@ METRIC_LABELS = {
 }
 
 # Numeric fields of an eval record that are not metrics.
-NOT_METRICS = {'seed', 'budget', 'budget_used', 'budget_fraction'}
+NOT_METRICS = {'seed', 'budget', 'budget_used', 'budget_fraction', 'elapsed_s'}
 # Fields that never distinguish one arm from another.
-NOT_SERIES = {'seed', 'final', 'budget_used', 'budget_fraction'}
+NOT_SERIES = {'seed', 'final', 'budget_used', 'budget_fraction', 'wall_time', 'elapsed_s'}
 
 
 # --------------------------------------------------------------------------- #

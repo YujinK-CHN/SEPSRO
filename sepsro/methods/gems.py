@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 
 import numpy as np
 import torch
@@ -142,6 +143,7 @@ class GEMS(Method):
             self.v_prev[p] = np.zeros(k0)
             self.v_ema[p] = np.full(k0, np.nan)
         self.iteration = 0
+        self._phase = self._phase_seconds = None   # progress logging only
         self._members = {}
         self._refresh()
         self._commit()
@@ -149,14 +151,23 @@ class GEMS(Method):
     # ------------------------------------------------------------------ loop
     def train(self):
         a = self.args
+        if a.gems_progress_interval > 0 and self.logger is not None:
+            self.budget.watch(a.gems_progress_interval, self._heartbeat)
+        self._phase_begin('return_range')
         self.range = return_range(self.env, self.rng, budget=self.budget)
+        self._phase_end()
         cap = a.gems_iterations
         while not self.budget.exhausted and (cap is None or self.iteration < cap):
             self.iteration += 1
             record = {'iteration': self.iteration}
+            self._phase_seconds = record['phase_seconds'] = {}
 
             # Phase 1: every seat against the others' sigma_{t-1}.
-            values = {p: self._estimate(p) for p in self.agents}
+            values = {}
+            for p in self.agents:
+                self._phase_begin('estimate', p)
+                values[p] = self._estimate(p)
+                self._phase_end()
             # The mixture's normalised value under sigma_{t-1} -- logged now, since
             # sigma changes length once the new anchor is added.
             record['mixture_value'] = {p: float(self.sigma[p] @ values[p]) for p in self.agents}
@@ -165,14 +176,20 @@ class GEMS(Method):
                 self._omwu(p, values[p])
             self._refresh()
             # Phase 3: candidates scored against the updated sigma.
-            chosen = {p: self._oracle(p) for p in self.agents}
+            chosen = {}
+            for p in self.agents:
+                self._phase_begin('oracle', p)
+                chosen[p] = self._oracle(p)
+                self._phase_end()
             for p, (z, info) in chosen.items():
                 self._add_anchor(p, z)
                 record.setdefault('oracle', {})[p] = info
             self._refresh()
             # Phase 4: one seat at a time, against the others' current generators.
             for p in self.agents:
+                self._phase_begin('abr', p)
                 record.setdefault('abr', {})[p] = self._abr_tr(p, chosen[p][0])
+                self._phase_end()
                 self._refresh()
 
             record.update(budget_used=self.budget.used,
@@ -181,6 +198,8 @@ class GEMS(Method):
                           anchors={p: len(self.anchors[p]) for p in self.agents})
             self.logger.train('gems_iteration', record)
             self._commit()
+            self._progress(f'iteration {self.iteration} done at {self.budget.used} steps; '
+                           f'phase seconds {record["phase_seconds"]}')
         self.env.close()
 
     def policies(self):
@@ -188,6 +207,46 @@ class GEMS(Method):
 
     def variant(self):
         return {'generator': self.args.gems_generator}
+
+    # ------------------------------------------------------------- progress
+    # Logging only: timestamped lines in stdout (the Slurm log) saying which
+    # phase the run is in, how many episodes it played, the longest one, and
+    # how long each phase and the ABR updates took. Nothing here changes the run.
+    def _progress(self, message):
+        if self.logger is not None and self.args.gems_progress_interval > 0:
+            self.logger.progress(f'[gems] {message}')
+
+    def _phase_begin(self, name, seat=None):
+        self._phase = {'name': name if seat is None else f'{name}/{seat}', 'start': time.time(),
+                       'steps0': self.budget.used, 'episodes': 0, 'longest': 0, 'update_s': 0.0}
+
+    def _phase_end(self):
+        ph = self._phase
+        seconds = time.time() - ph['start']
+        if ph['name'] == 'return_range':
+            self._progress(f'return range {self.range}: {self.budget.used - ph["steps0"]} steps, '
+                           f'{seconds:.0f}s')
+            return
+        if self._phase_seconds is not None:
+            self._phase_seconds[ph['name']] = round(seconds, 1)
+        self._progress(f'it {self.iteration} {ph["name"]}: {ph["episodes"]} episodes, '
+                       f'{self.budget.used - ph["steps0"]} steps, longest {ph["longest"]}, '
+                       f'{seconds:.0f}s' + (f' (updates {ph["update_s"]:.0f}s)' if ph['update_s'] else ''))
+
+    def _heartbeat(self, mark):
+        ph = self._phase or {'name': '?', 'start': time.time(), 'episodes': 0,
+                                               'longest': 0}
+        self._progress(f'{mark} steps: it {self.iteration} {ph["name"]}, '
+                       f'{ph["episodes"]} episodes so far, longest {ph["longest"]}, '
+                       f'{time.time() - ph["start"]:.0f}s in phase')
+
+    def _play(self, joint, record=False):
+        ep = play_episode(self.env, joint, self.rng, budget=self.budget, record=record)
+        ph = self._phase
+        if ph is not None:
+            ph['episodes'] += 1
+            ph['longest'] = max(ph['longest'], ep.length)
+        return ep
 
     # ------------------------------------------------------------- helpers
     def _refresh(self):
@@ -220,7 +279,7 @@ class GEMS(Method):
             joint = self._opponents(p)
             joint[p] = policy
             for _ in range(rollouts):
-                ep = play_episode(self.env, joint, self.rng, budget=self.budget)
+                ep = self._play(joint)
                 out.append(self._norm(p, ep.returns[p]))
         return np.asarray(out)
 
@@ -308,11 +367,14 @@ class GEMS(Method):
             for z in codes:
                 joint = self._opponents(p)
                 joint[p] = GeneratorPolicy(gen, z, a.gems_temperature)
-                ep = play_episode(self.env, joint, self.rng, budget=self.budget, record=True)
+                ep = self._play(joint, record=True)
                 if ep.trajectories[p]:
                     batch.append((z, ep.trajectories[p]))
             if batch:
+                started = time.time()
                 stats = self._abr_update(p, gen, critic, old, batch, scale)
+                if self._phase is not None:
+                    self._phase['update_s'] += time.time() - started
         return stats
 
     def _abr_update(self, p, gen, critic, old, batch, scale):

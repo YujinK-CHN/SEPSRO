@@ -294,6 +294,9 @@ def _add_gems_config(parser):
     # generator / latent
     group.add_argument('--gems-latent-dim', type=int, default=8, help='d_z.')
     group.add_argument('--gems-temperature', type=float, default=1.0, help='Policy temperature tau.')
+    group.add_argument('--gems-progress-interval', type=int, default=100_000,
+                       help='Print a progress line to stdout every this many env steps; 0 = off. '
+                            'Logging only.')
     group.add_argument('--gems-generator', type=str, default='hyper', choices=('hyper', 'conditional'),
                        help="'hyper': z -> policy weights, as described in the paper; "
                             "'conditional': MLP([obs, z]).")

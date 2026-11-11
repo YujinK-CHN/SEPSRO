@@ -21,7 +21,8 @@ post-hoc best-response trainer) keeps the soft default and checks `exhausted`.
 Watermarks: watch(every, callback) calls callback(watermark) each time `used`
 reaches a multiple of `every` below `total`. The Evaluator scores methods
 this way, so every method is evaluated at the same env-step counts whatever
-its iteration structure.
+its iteration structure; methods may add their own (progress heartbeats).
+Several watchers can be registered; they fire in registration order.
 
 What is charged: every step a method takes while training, INCLUDING the
 simulations used to estimate payoff tables (they are experience the method
@@ -44,25 +45,25 @@ class BudgetTracker:
         self.total = int(total)
         self.hard = bool(hard)
         self.used = 0
-        self._watch = None   # (every, callback, next watermark)
+        self._watches = []   # [every, callback, next watermark] each
 
     def watch(self, every: int, callback):
         """Call callback(watermark) whenever `used` reaches a multiple of `every` below total."""
         every = int(every)
         if every <= 0:
             raise ValueError(f'Watermark interval must be positive, got {every}.')
-        self._watch = [every, callback, (self.used // every + 1) * every]
+        self._watches.append([every, callback, (self.used // every + 1) * every])
 
     def consume(self, steps: int, strict=False):
         if strict and self.used + steps > self.total:
             raise BudgetExhausted(f'{self.used} + {steps} > {self.total}')
         self.used += int(steps)
-        if self._watch is not None:
-            every, callback, mark = self._watch
+        for watch in self._watches:
+            every, callback, mark = watch
             while mark <= self.used and mark < self.total:
-                self._watch[2] = mark + every
+                watch[2] = mark + every
                 callback(mark)
-                mark = self._watch[2]
+                mark = watch[2]
         if self.hard and self.used >= self.total:
             raise BudgetExhausted(f'budget of {self.total} env steps spent')
 

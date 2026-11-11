@@ -12,12 +12,18 @@ Two streams per run directory:
                  into one frame and plotted on one budget axis.
     train.jsonl  everything method-internal (losses, meta-strategies,
                  population sizes, ...). Heterogeneous by design; for diagnosis.
+
+Every record of both streams carries `wall_time` (local ISO time) and
+`elapsed_s` (seconds since the logger was made), so a run's speed and where it
+spent its time can be read from the files. progress() prints a timestamped
+line to stdout only (the Slurm log).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 
 import numpy as np
 
@@ -64,17 +70,30 @@ class RunLogger:
         self.echo = echo
         self._eval = JsonlWriter(os.path.join(run_dir, 'eval.jsonl'))
         self._train = JsonlWriter(os.path.join(run_dir, 'train.jsonl'))
+        self._start = time.time()
+
+    def _stamp(self):
+        return {'wall_time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'elapsed_s': round(time.time() - self._start, 1)}
+
+    def _prefix(self):
+        return f'{time.strftime("%m-%d %H:%M:%S")} +{(time.time() - self._start) / 3600:.2f}h'
 
     def eval(self, record):
-        record = {**self.meta, **record}
+        record = {**self.meta, **record, **self._stamp()}
         self._eval.write(record)
         if self.echo:
             shown = {k: (round(v, 4) if isinstance(v, float) else v)
-                     for k, v in record.items() if k not in self.meta}
-            print(f'[eval] {shown}', flush=True)
+                     for k, v in record.items() if k not in self.meta and k not in self._stamp()}
+            print(f'[eval {self._prefix()}] {shown}', flush=True)
 
     def train(self, kind, record):
-        self._train.write({'kind': kind, **record})
+        self._train.write({'kind': kind, **record, **self._stamp()})
+
+    def progress(self, message):
+        """A timestamped line in stdout (the Slurm log), not in the JSONL files."""
+        if self.echo:
+            print(f'[{self._prefix()}] {message}', flush=True)
 
     def close(self):
         self._eval.close()

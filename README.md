@@ -87,6 +87,15 @@ records with meta-strategies, values, oracle picks and ABR losses), and
 `final_policies.pkl` (the final joint policy, for `posthoc.py`). The post-hoc
 tools add `exploit.json` to a run and `crossplay.json` to the env directory.
 
+Every record in both JSONL files carries `wall_time` and `elapsed_s`, and the
+`[eval]` lines in stdout are timestamped, so a run's speed can be read from
+its files. GEMS also prints timestamped progress lines to stdout (the Slurm
+log): one per phase and seat (episodes, env steps, longest episode, seconds,
+and for ABR-TR the time spent in updates), one per finished iteration, and a
+heartbeat every `--gems-progress-interval` env steps (default 100k, 0 = off)
+naming the current phase. `gems_iteration` records hold `phase_seconds`. None
+of this changes the run.
+
 The budget is a hard stop: training ends at exactly `--budget` env steps,
 mid-iteration if need be, and every evaluation scores the method's last
 *committed* output (PSRO: the meta-strategy after the last solve; GEMS: the
