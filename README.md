@@ -38,24 +38,32 @@ On a login node:
 cd ~/projects/def-yourpi && git clone https://github.com/YujinK-CHN/SEPSRO.git && cd SEPSRO
 bash setup_cluster.sh                 # venv at ~/venvs/sepsro (python/3.11 module)
 source ~/venvs/sepsro/bin/activate && AutoROM   # only for space_invaders; accept the ROM licence
-bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
-    --env space_invaders --budget 5000000 --seeds 0,1,2 --time 48:00:00
+bash submit.sh --account def-yourpi --exp-name si_gems --method gems \
+    --env space_invaders --budget 30000000 --seeds 0,1,2,3,4 --time 36:00:00
 ```
 
 `setup_cluster.sh` installs from the Alliance wheelhouse where possible and
 from PyPI otherwise (compute nodes have no internet, so everything is installed
-up front). `submit.sh` submits one Slurm array task per (method, seed),
+up front). One `submit.sh` call is one task of one [round](#rounds): exactly
+one `--method`, a required `--exp-name`, one Slurm array task per seed,
 CPU-only by default (`--cpus 4 --mem 16G --time 24:00:00`; `--gpus 1` if ever
 needed); every other flag goes to `main.py`. Before submitting it builds the
-env once on the login node and refuses run directories that already hold logs
-(unless `--overwrite`). `--dry-run` writes and prints the job script only. Job
-scripts go to `<out-root>/jobs/`, Slurm logs to `<out-root>/logs/`.
+env once on the login node and refuses what `main.py` would refuse: seeds that
+already hold logs (unless `--overwrite`) and settings that differ from the
+round's. `--dry-run` writes and prints the job script only. Job scripts and
+Slurm logs go to `<round>/slurm/`.
 
-`--task exploit` runs the approximate NashConv on finished runs (one task per
-method, seed and checkpoint: `--checkpoints final` by default, e.g.
+`--task exploit` runs the approximate NashConv on the round's finished seeds
+(one task per seed and checkpoint: `--checkpoints final` by default, e.g.
 `--checkpoints 0,0.25,0.5,0.75,1` for a 5-point curve), `--task crossplay` the
-cross-play matrix over every finished run of the experiment (one task); see
-[Experiment protocol](#experiment-protocol).
+round's cross-play (one task; `--against <round> ...` adds other rounds). Neither
+takes `--method`: the round has it. See [Experiment protocol](#experiment-protocol).
+
+```bash
+bash submit.sh --account def-yourpi --exp-name si_gems --seeds 0,1,2,3,4 --task exploit \
+    --checkpoints 0,0.25,0.5,0.75,1 --time 12:00:00
+bash submit.sh --account def-yourpi --exp-name si_gems --task crossplay --against si_psro_ppo
+```
 
 ## How to run
 
@@ -67,16 +75,16 @@ python main.py --method psro --env kuhn_poker --psro-oracle br  --budget 1000000
 python main.py --method psro --env kuhn_poker --psro-oracle pg  --budget 100000000
 python main.py --method psro --env kuhn_poker --psro-oracle dqn --budget 100000000
 
-bash run.sh --method psro --env leduc_poker --budget 100000000 --seeds 0,1,2
+bash run.sh --method psro --env leduc_poker --budget 100000000 --seeds 0,1,2 --exp-name leduc_psro
 
 # GEMS with the paper's defaults (no iteration cap: it runs until the budget is spent)
 python main.py --method gems --env kuhn_poker --budget 100000000
 python main.py --method gems --env connect_four --budget 100000000
 
 # post-hoc metrics on finished runs
-python posthoc.py exploit results/main/space_invaders/gems/seed0                     # final policy
-python posthoc.py exploit results/main/space_invaders/gems/seed0 --checkpoint 0,0.5,1  # a curve
-python posthoc.py crossplay results/main/space_invaders
+python posthoc.py exploit results/si_gems/stats/seed0                       # final policy
+python posthoc.py exploit results/si_gems/stats/seed0 --checkpoint 0,0.5,1  # a curve
+python posthoc.py crossplay results/si_gems --against si_psro_ppo            # within + against
 ```
 
 `--eval-metrics nash_conv` gives exact NashConv on OpenSpiel turn-based games
@@ -84,16 +92,43 @@ and on the native matrix games; on Kuhn and Leduc it is on by default
 (`nash_conv vs_random self_play`, from `config.ENV_OVERRIDES`). PettingZoo games have no exact equivalent; use
 `vs_random` / `self_play` there.
 
-Output goes to two trees with the same `<exp-name>/<env>/<method>/seed<seed>/`
-layout, so the statistics can be copied back without the (large) policies:
+### Rounds
 
-| tree | holds |
-|---|---|
-| `results/` (the statistics) | `config.json` (every setting, including the per-env overrides applied); `eval.jsonl` (one record before training, one every `--eval-interval` env steps, one at the end; same schema for every method; each names the `checkpoint` it scored); `train.jsonl` (method internals: `psro_iteration` / `oracle_episode` records, `gems_iteration` records with meta-strategies, values, oracle picks and ABR losses); from `posthoc.py`, `exploit/<checkpoint>.json` per run and `crossplay.json` per env directory |
-| `results/checkpoints/` (`--checkpoint-root`) | the joint policy of each evaluation: `step_<N>.pkl` (env step N, every `--checkpoint-every`-th point; default 1 = all, 0 = none) and `final.pkl` (always), plus `objects/`, their networks |
+A **round** is the complete result of one method with one configuration in
+one env: all its seeds, in one folder named by `--exp-name`. Name it after what
+defines it (e.g. `si_gems`, `kuhn_psro_br`); another method or configuration is
+another round.
 
-`posthoc.py` reads the checkpoints (the run's `config.json` names their
-directory) and writes only into the statistics tree. Each network is stored
+```
+results/<round>/
+  round.json              the round's settings: every setting except the seed, paths
+                          and logging-only ones (device, progress intervals)
+  stats/                  the statistics -- copy this back to plot
+    seed<N>/
+      config.json         every setting, including the per-env overrides applied
+      eval.jsonl          one record before training, one every --eval-interval env
+                          steps, one at the end; same schema for every method; each
+                          names the checkpoint it scored
+      train.jsonl         method internals: psro_iteration / oracle_episode records,
+                          gems_iteration records (meta-strategies, values, oracle
+                          picks, ABR losses)
+      exploit/<checkpoint>.json   posthoc.py exploit
+    crossplay/within.json, vs_<round>.json   posthoc.py crossplay
+  checkpoints/seed<N>/    the policies -- only if needed (large on Atari)
+    step_<N>.pkl          the joint policy of the evaluation at env step N (every
+                          --checkpoint-every-th point; default 1 = all, 0 = none)
+    final.pkl             the final one (always)
+    objects/              their networks
+  slurm/                  job scripts and Slurm logs (submit.sh)
+```
+
+The first seed writes `round.json`; a later seed whose settings differ is
+refused, so a round's seeds can be averaged. The name can take a new
+configuration only once no seed of the old one is left (or with `--overwrite`
+for a round of one seed).
+
+`posthoc.py` finds a seed's checkpoints next to its statistics (wherever the
+round now lives) and writes only into `stats/`. Each network is stored
 once in `objects/`, named by a hash of its contents (`sepsro/checkpoints.py`):
 a PSRO population member is written when it first appears, not again in every
 later checkpoint, and a GEMS generator once per iteration however many anchors
@@ -116,32 +151,32 @@ mid-iteration if need be, and every evaluation scores the method's last
 anchors, sigma and generator after the last completed iteration).
 
 Every eval record carries `method`, `env`, `seed`, `budget` and the method's
-variant (PSRO: `oracle`, `meta_solver`, `pg_loss`; GEMS: `generator`), so arms
-of one method never merge in a plot. A run directory that already holds logs is
-refused; use another `--exp-name` per arm, or `--overwrite` to replace a run.
+variant (PSRO: `oracle`, `meta_solver`, `pg_loss`; GEMS: `generator`). A seed
+that already holds logs is refused; use `--overwrite` to replace it.
 
 OpenSpiel games take parameters inline: `--env "openspiel:kuhn_poker(players=3)"`.
 
 ## Plotting
 
 ```bash
-python plot_results.py results/main --list-metrics          # arms, seeds, metrics found
-python plot_results.py results/main                         # nash_conv, else approx_nash_conv, else vs_random/mean
-python plot_results.py results/main --metric vs_random/mean --metric self_play/mean --train
+python plot_results.py results --list-metrics                       # every round, its seeds, metrics
+python plot_results.py results/kuhn_psro results/kuhn_gems          # nash_conv, else approx_nash_conv, else vs_random/mean
+python plot_results.py results/si_psro --metric vs_random/mean --metric self_play/mean --train
 python plot_results.py results --filter env=space_invaders --band minmax --out fig.pdf
-python plot_results.py results/main --table                 # the numbers instead of a figure
+python plot_results.py results/kuhn_psro --table                    # the numbers instead of a figure
 ```
 
-One series per arm (experiment, env, method and the method's variant fields
-from the eval records); seeds are averaged with a std / min-max / IQR band on
-the env-step axis, interpolated onto a shared grid where seeds' evaluation
-points differ. Legend names show only what differs between the plotted arms.
+Give it rounds (or `results/` for all). One series per round, named after it;
+seeds are averaged with a std / min-max / IQR band on the env-step axis,
+interpolated onto a shared grid where seeds' evaluation points differ. Only
+`stats/` is read, so it runs on a copy without checkpoints.
 Scored checkpoints (`exploit/*.json`) join their run as the metric
 `approx_nash_conv`, one point per checkpoint, so `posthoc.py exploit
 --checkpoint 0,0.25,0.5,0.75,1` on every run gives an approximate-NashConv curve.
 `--train` adds `<out>_train.png`: PSRO's best-response training return and
 GEMS's mixture value and chosen-candidate value per iteration and seat.
-Default output: `<root>/plot.png`.
+Default output: `results/plots/<round>_vs_<round>__<metric>.png`, outside every
+round.
 
 ## Space Invaders (PettingZoo Atari)
 
@@ -308,9 +343,12 @@ the run's final policy of the other seat, and the gains in return over the
 final policy are summed. It is a lower bound (an RL best response can be
 weaker than the exact one) and is only comparable because every run gets the
 identical protocol; on Kuhn and Leduc `exploit/<checkpoint>.json` also holds the exact
-value, which checks the protocol. *Cross-play* pairs every run's seat-0 policy
-with every other run's seat-1 policy (all methods and seeds) and reports each
-run's mean return against co-players it never trained with.
+value, which checks the protocol. *Cross-play* (per round) pairs each seed's
+final policy with co-players it never trained with: the round's other seeds
+(`within.json`), and every seed of each `--against` round in both seat
+assignments (`vs_<round>.json`); it reports each seed's mean return and the
+mean and std over seeds. Methods are compared by running each round against
+the same other rounds.
 
 **Space Invaders settings** (`config.ENV_OVERRIDES['space_invaders']`;
 starting points for the pilot, every other setting is the published default)
@@ -342,10 +380,10 @@ in `ENV_OVERRIDES`, and everything tried is listed here.
 config.py                 single source of truth: ENV_PRESETS + every hyper-parameter
 main.py                   single entry point; builds shared pieces, runs --method
 posthoc.py                approximate NashConv (PPO best responses) and cross-play on finished runs
-run.sh                    launcher over methods x seeds (local)
+run.sh                    launcher over the seeds of one round (local)
 setup_cluster.sh          one-time venv setup on an Alliance login node
-submit.sh                 Slurm job-array submission (one task per method x seed [x checkpoint])
-plot_results.py           learning curves across arms and seeds (+ training diagnostics)
+submit.sh                 Slurm job-array submission: one round, one task per seed [x checkpoint]
+plot_results.py           learning curves of rounds, seeds averaged (+ training diagnostics)
 sepsro/
   checkpoints.py          policy checkpoints that store each network once (objects/<hash>.pkl)
   envs/

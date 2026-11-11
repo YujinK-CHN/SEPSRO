@@ -132,7 +132,7 @@ def _run(tmp_path, env_name, *extra):
     import main
     main.main(['--method', 'gems', '--env', env_name, '--budget', '10000000',
                '--results-dir', str(tmp_path), *_SMALL, *extra])
-    run_dir = tmp_path / 'check' / parse_env(env_name)['name'] / 'gems' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     train = [json.loads(line) for line in (run_dir / 'train.jsonl').read_text().splitlines()]
     evals = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     return train, evals

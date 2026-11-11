@@ -2,11 +2,11 @@
 Post-hoc metrics on finished runs, from the policy checkpoints main.py saves.
 
     python posthoc.py exploit   <run_dir> [--checkpoint WHICH] [config flags]
-    python posthoc.py crossplay <dir> [<dir> ...] [--episodes N] [--out file.json]
+    python posthoc.py crossplay <round> [--against <round> ...] [--episodes N]
 
-<run_dir> is the run's statistics directory (results/<exp>/<env>/<method>/
-seed<N>); its config.json says where the checkpoints are. Results are written
-there, never next to the checkpoints, so copying the statistics tree is enough.
+A round is results/<exp-name>/: stats/seed<N>/ (a <run_dir>) and
+checkpoints/seed<N>/. Both tools read the checkpoints and write only into
+stats/, so copying stats/ back is enough.
 
 exploit -- approximate NashConv (the paper's Atari metric; Timbers et al., 2022)
     For each seat i, a FRESH PPO learner trains a best response BR_i against
@@ -35,11 +35,15 @@ exploit -- approximate NashConv (the paper's Atari metric; Timbers et al., 2022)
     Output: <run_dir>/exploit/<checkpoint>.json, with the checkpoint's env step.
 
 crossplay -- returns against co-players never trained with (two-player games)
-    Every run's final (final.pkl) seat-0 policy plays every run's final seat-1 policy for
-    --episodes episodes. For each run: the mean return of its seat 0 against
-    the OTHER runs' seat 1, of its seat 1 against the other runs' seat 0, and
-    their mean; then mean and std over the runs of each method. Output: the
-    full matrix and the summary, in --out (default <first dir>/crossplay.json).
+    With the final policies (final.pkl) of the round's seeds, --episodes
+    episodes per pairing:
+        within   seed i's seat 0 with seed j's seat 1, for all i != j
+                 (needs two finished seeds)
+        against  for each --against round: every seed of this round with every
+                 seed of that one, in both seat assignments
+    Per seed: the mean return as seat 0, as seat 1, and their mean; then mean
+    and std over the seeds. Output: <round>/stats/crossplay/within.json and
+    vs_<round>.json. Comparing methods = each round against the same others.
 
 Neither spends training budget; both only read the runs. Load pickles you
 wrote yourself only.
@@ -56,7 +60,7 @@ import time
 
 import numpy as np
 
-from config import parse_args, parse_env
+from config import STATS_DIR, checkpoint_dir_of, parse_args, parse_env
 from main import FINAL_CHECKPOINT, checkpoint_path, load_policies
 from sepsro.budget import BudgetTracker
 from sepsro.envs import make_env
@@ -65,7 +69,10 @@ from sepsro.rollout import play_episode
 
 def _read_config(run_dir):
     with open(os.path.join(run_dir, 'config.json'), encoding='utf-8') as handle:
-        return json.load(handle)
+        cfg = json.load(handle)
+    # From where the run is now, not where it was trained: a round can be moved.
+    cfg['checkpoint_dir'] = checkpoint_dir_of(run_dir)
+    return cfg
 
 
 def checkpoints(cfg):
@@ -220,92 +227,148 @@ def _exploit_one(run_dir, cfg, args, step, name):
 
 
 # ------------------------------------------------------------------- crossplay
-def _has_final(run_dir):
-    try:
-        cfg = _read_config(run_dir)
-    except (OSError, ValueError):
-        return False
-    return 'checkpoint_dir' in cfg and os.path.exists(
-        checkpoint_path(cfg['checkpoint_dir'], FINAL_CHECKPOINT))
+def resolve_round(name, near=None):
+    """A round given as a directory, or as a name next to `near` (another round) / in results/."""
+    if os.path.isdir(os.path.join(name, STATS_DIR)):
+        return os.path.normpath(name)
+    for base in ([os.path.dirname(os.path.normpath(near))] if near else []) + ['results']:
+        candidate = os.path.join(base, name)
+        if os.path.isdir(os.path.join(candidate, STATS_DIR)):
+            return os.path.normpath(candidate)
+    raise SystemExit(f'No round {name!r} (a directory holding {STATS_DIR}/).')
 
 
-def find_finished_runs(paths):
-    """Statistics directories (with config.json) under `paths` whose final.pkl exists."""
-    runs = []
-    for path in paths:
-        candidates = ([path] if os.path.exists(os.path.join(path, 'config.json')) else
-                      sorted(os.path.dirname(f) for f in
-                             glob.glob(os.path.join(path, '**', 'config.json'), recursive=True)))
-        runs += [r for r in candidates if _has_final(r)]
-    return runs
+def finished_seeds(round_dir):
+    """[(run_dir, config)] of a round's seeds whose final.pkl exists, in seed order."""
+    out = []
+    for run_dir in glob.glob(os.path.join(round_dir, STATS_DIR, 'seed*')):
+        try:
+            cfg = _read_config(run_dir)
+        except (OSError, ValueError):
+            continue
+        if os.path.exists(checkpoint_path(cfg['checkpoint_dir'], FINAL_CHECKPOINT)):
+            out.append((run_dir, cfg))
+    return sorted(out, key=lambda item: item[1]['seed'])
 
 
-def _find_runs(paths):
-    runs = find_finished_runs(paths)
-    if len(runs) < 2:
-        raise SystemExit(f'Cross-play needs at least two finished runs; found {len(runs)} in {paths}.')
-    return runs
+def _load_finals(seeds):
+    return [load_policies(checkpoint_path(cfg['checkpoint_dir'], FINAL_CHECKPOINT))
+            for _, cfg in seeds]
 
 
-def crossplay(paths, episodes, out=None):
-    runs = _find_runs(paths)
-    configs = [_read_config(r) for r in runs]
-    envs = {c['env'] for c in configs}
+def _summary(values):
+    values = list(values)
+    return {'mean': float(np.mean(values)),
+            'std': float(np.std(values, ddof=1)) if len(values) > 1 else 0.0, 'n': len(values)}
+
+
+def _pairing(env, first, second, seat0, seat1, episodes, rng_key):
+    """Mean returns (seat 0, seat 1) of first's seat-0 policy with second's seat-1 policy."""
+    values = _returns(env, {seat0: first[seat0], seat1: second[seat1]},
+                      np.random.default_rng(rng_key), episodes)
+    return values[seat0][0], values[seat1][0]
+
+
+def crossplay(round_dir, against=(), episodes=100, overwrite=False):
+    """Cross-play of a round: among its own seeds, and against each round in `against`.
+
+    within.json      seed i's seat 0 with seed j's seat 1, for every i != j (the
+                     diagonal, self-play, is recorded but not in the means): how
+                     well independently trained runs of the method play together.
+    vs_<round>.json  each of this round's seeds with each of the other round's,
+                     in both seat assignments: this round's return as seat 0
+                     against their seat 1, and as seat 1 against their seat 0.
+    Both in <round>/stats/crossplay/, with per-seed means and mean / std over seeds.
+    """
+    round_dir = resolve_round(round_dir)
+    others = [resolve_round(o, near=round_dir) for o in against]
+    name = os.path.basename(round_dir)
+    mine = finished_seeds(round_dir)
+    if not mine:
+        raise SystemExit(f'Round {round_dir} has no finished seed (final.pkl).')
+    if len(mine) < 2 and not others:
+        raise SystemExit(f'Round {round_dir} has one finished seed: within-round cross-play '
+                         'needs two; add --against <round>.')
+    pools = {os.path.basename(o): finished_seeds(o) for o in others}
+    for other, seeds in pools.items():
+        if not seeds:
+            raise SystemExit(f'Round {other} has no finished seed (final.pkl).')
+    envs = {cfg['env'] for _, cfg in mine} | {cfg['env'] for s in pools.values() for _, cfg in s}
     if len(envs) != 1:
-        raise SystemExit(f'Runs come from different envs: {sorted(envs)}.')
-    env = _env_for(configs[0])
+        raise SystemExit(f'Rounds come from different envs: {sorted(envs)}.')
+    env = _env_for(mine[0][1])
     if env.spec.num_agents != 2:
         raise SystemExit('Cross-play is defined here for two-player games.')
     seat0, seat1 = env.spec.agents
-    policies = [load_policies(checkpoint_path(c['checkpoint_dir'], FINAL_CHECKPOINT))
-                for c in configs]
-    root = os.path.commonpath(runs)
-    several_exps = len({c.get('exp_name') for c in configs}) > 1
-    labels = [(f'{c.get("exp_name")}/' if several_exps else '') + f'{c["method"]}/seed{c["seed"]}'
-              for c in configs]
-    if len(set(labels)) < len(labels):   # e.g. two arms of one method: fall back to paths
-        labels = [os.path.relpath(r, root) for r in runs]
 
-    n = len(runs)
-    matrix = np.zeros((n, n, 2))   # [run of seat 0, run of seat 1, seat]
-    for i in range(n):
-        for j in range(n):
-            joint = {seat0: policies[i][seat0], seat1: policies[j][seat1]}
-            values = _returns(env, joint, np.random.default_rng([i, j, 3]), episodes)
-            matrix[i, j] = values[seat0][0], values[seat1][0]
-        print(f'[crossplay] {labels[i]} done ({i + 1}/{n})', flush=True)
+    out_dir = os.path.join(round_dir, STATS_DIR, 'crossplay')
+    targets = ([os.path.join(out_dir, 'within.json')] if len(mine) > 1 else []) + \
+        [os.path.join(out_dir, f'vs_{other}.json') for other in pools]
+    done = [t for t in targets if os.path.exists(t)]
+    if done and not overwrite:
+        raise SystemExit(f'{", ".join(done)} exist(s). Use --overwrite to replace.')
+    os.makedirs(out_dir, exist_ok=True)
 
-    per_run = {}
-    for i, label in enumerate(labels):
-        others = [j for j in range(n) if j != i]
-        as0 = float(matrix[i, others, 0].mean())
-        as1 = float(matrix[others, i, 1].mean())
-        per_run[label] = {'method': configs[i]['method'], 'seed': configs[i]['seed'],
-                          f'{seat0}_vs_others': as0, f'{seat1}_vs_others': as1,
-                          'mean_vs_others': (as0 + as1) / 2,
-                          'self_play': matrix[i, i].tolist()}
-    per_method = {}
-    for method in sorted({c['method'] for c in configs}):
-        values = [r['mean_vs_others'] for r in per_run.values() if r['method'] == method]
-        per_method[method] = {'mean': float(np.mean(values)),
-                              'std': float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
-                              'runs': len(values)}
+    policies = _load_finals(mine)
+    seeds = [cfg['seed'] for _, cfg in mine]
+    common = {'round': name, 'env': mine[0][1]['env'], 'method': mine[0][1]['method'],
+              'episodes': episodes, 'seats': [seat0, seat1], 'seeds': seeds}
+    results = {}
 
-    print(f'\n{"run":40s} {seat0 + " vs others":>18s} {seat1 + " vs others":>18s} {"mean":>10s}')
-    for label, r in per_run.items():
-        print(f'{label:40s} {r[f"{seat0}_vs_others"]:18.2f} {r[f"{seat1}_vs_others"]:18.2f} '
-              f'{r["mean_vs_others"]:10.2f}')
-    print()
-    for method, r in per_method.items():
-        print(f'{method:12s} mean vs others {r["mean"]:.2f} +- {r["std"]:.2f} ({r["runs"]} runs)')
+    if len(mine) > 1:
+        n = len(mine)
+        matrix = np.zeros((n, n, 2))   # [seed of seat 0, seed of seat 1, seat]
+        for i in range(n):
+            for j in range(n):
+                matrix[i, j] = _pairing(env, policies[i], policies[j], seat0, seat1, episodes,
+                                        [seeds[i], seeds[j], 3])
+        per_seed = {}
+        for i, seed in enumerate(seeds):
+            rest = [j for j in range(n) if j != i]
+            as0, as1 = float(matrix[i, rest, 0].mean()), float(matrix[rest, i, 1].mean())
+            per_seed[seed] = {f'{seat0}_vs_others': as0, f'{seat1}_vs_others': as1,
+                              'mean_vs_others': (as0 + as1) / 2,
+                              'self_play': matrix[i, i].tolist()}
+        results['within'] = {**common, 'matrix': matrix.tolist(), 'per_seed': per_seed,
+                             'summary': _summary(r['mean_vs_others'] for r in per_seed.values())}
+        print(f'[crossplay] {name} within: {_fmt(results["within"]["summary"])}', flush=True)
 
-    out = out or os.path.join(paths[0], 'crossplay.json')
-    with open(out, 'w', encoding='utf-8') as handle:
-        json.dump({'env': configs[0]['env'], 'episodes': episodes, 'seats': [seat0, seat1],
-                   'runs': labels, 'root': root, 'matrix': matrix.tolist(),
-                   'per_run': per_run, 'per_method': per_method}, handle, indent=2)
-    print(f'[crossplay] -> {out}')
-    return per_run, per_method
+    for other, theirs in pools.items():
+        their_policies = _load_finals(theirs)
+        their_seeds = [cfg['seed'] for _, cfg in theirs]
+        n, m = len(mine), len(theirs)
+        as_seat0 = np.zeros((n, m, 2))   # [my seed, their seed, seat]: me as seat 0
+        as_seat1 = np.zeros((m, n, 2))   # [their seed, my seed, seat]: me as seat 1
+        for i in range(n):
+            for k in range(m):
+                as_seat0[i, k] = _pairing(env, policies[i], their_policies[k], seat0, seat1,
+                                          episodes, [seeds[i], their_seeds[k], 4])
+                as_seat1[k, i] = _pairing(env, their_policies[k], policies[i], seat0, seat1,
+                                          episodes, [their_seeds[k], seeds[i], 5])
+        per_seed = {}
+        for i, seed in enumerate(seeds):
+            mine0, mine1 = float(as_seat0[i, :, 0].mean()), float(as_seat1[:, i, 1].mean())
+            per_seed[seed] = {f'{seat0}_vs_them': mine0, f'{seat1}_vs_them': mine1,
+                              'mean_vs_them': (mine0 + mine1) / 2,
+                              'their_return': float((as_seat0[i, :, 1].mean()
+                                                     + as_seat1[:, i, 0].mean()) / 2)}
+        key = f'vs_{other}'
+        results[key] = {**common, 'against': other, 'against_method': theirs[0][1]['method'],
+                        'against_seeds': their_seeds, 'as_seat0': as_seat0.tolist(),
+                        'as_seat1': as_seat1.tolist(), 'per_seed': per_seed,
+                        'summary': _summary(r['mean_vs_them'] for r in per_seed.values())}
+        print(f'[crossplay] {name} vs {other}: {_fmt(results[key]["summary"])}', flush=True)
+
+    for key, result in results.items():
+        path = os.path.join(out_dir, f'{key}.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(result, handle, indent=2)
+    print(f'[crossplay] -> {out_dir}')
+    return results
+
+
+def _fmt(summary):
+    return f'mean return {summary["mean"]:.3f} +- {summary["std"]:.3f} over {summary["n"]} seed(s)'
 
 
 def main(argv=None):
@@ -330,11 +393,13 @@ def main(argv=None):
                 rest.append(a)
         return exploit(argv[1], rest, which)
     parser = argparse.ArgumentParser(prog='posthoc.py crossplay')
-    parser.add_argument('paths', nargs='+', help='Run directories, or directories holding runs.')
+    parser.add_argument('round', help='The round: its directory, or its name in results/.')
+    parser.add_argument('--against', nargs='+', default=[],
+                        help='Other rounds (directories, or names next to the round).')
     parser.add_argument('--episodes', type=int, default=100, help='Episodes per pairing.')
-    parser.add_argument('--out', default=None)
+    parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args(argv[1:])
-    return crossplay(args.paths, args.episodes, args.out)
+    return crossplay(args.round, args.against, args.episodes, args.overwrite)
 
 
 if __name__ == '__main__':

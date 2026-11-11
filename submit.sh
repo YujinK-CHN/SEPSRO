@@ -2,41 +2,50 @@
 #
 # Submit SEPSRO runs to Slurm (Digital Research Alliance clusters).
 #
-# Same knobs as run.sh -- every (method, seed) pair becomes one task of a job
-# array, so seeds run in parallel on separate nodes/cores:
+# One submission = one task of one round. A round (--exp-name) is one method
+# with one configuration in one env, every seed of it, all in one folder:
 #
-#   bash submit.sh --account def-yourpi --exp-name si_main \
-#       --method gems --method psro --env space_invaders \
-#       --budget 5000000 --seeds 0,1,2 --time 48:00:00
+#   <out-root>/<exp-name>/
+#     round.json          the round's settings; a seed with other settings is refused
+#     stats/seed<N>/      statistics: config, eval / train logs, exploit and cross-play results
+#     checkpoints/seed<N>/  policies (copy back only if needed)
+#     slurm/              job scripts and Slurm logs
 #
-# Any other flag goes to main.py unchanged, for every task:
+# Name the round after what defines it. Every seed becomes one task of a job
+# array, so seeds run in parallel:
 #
-#   bash submit.sh --account def-yourpi --exp-name kuhn_br --method psro \
-#       --env kuhn_poker --budget 100000000 --seeds 0,1,2,3,4 \
-#       --psro-oracle br
+#   bash submit.sh --account def-yourpi --exp-name si_gems --method gems \
+#       --env space_invaders --budget 30000000 --seeds 0,1,2,3,4 --time 36:00:00
+#
+# Any other flag goes to main.py unchanged, for every seed:
+#
+#   bash submit.sh --account def-yourpi --exp-name kuhn_psro_br --method psro \
+#       --env kuhn_poker --budget 100000000 --seeds 0,1,2,3,4 --psro-oracle br
+#
+# Another method or configuration is another round: another --exp-name, another
+# submission (only one --method per submission).
+#
+# --task picks what the jobs run (default train):
+#   train      main.py, one array task per seed
+#   exploit    posthoc.py exploit on the round's finished seeds: approximate
+#              NashConv, one array task per (seed, checkpoint); --checkpoints
+#              picks them (default final; e.g. 0,0.25,0.5,0.75,1 for a 5-point
+#              curve: fractions of the budget; 'all' = every checkpoint of a seed
+#              in one task). Other flags go to posthoc.py (e.g. --exploit-steps).
+#   crossplay  posthoc.py crossplay on the round: one task, among its seeds and
+#              against the rounds given by --against (other flags, e.g.
+#              --episodes, go to posthoc.py)
+#
+#   bash submit.sh --account def-yourpi --exp-name si_gems --seeds 0,1,2,3,4 \
+#       --task exploit --checkpoints 0,0.25,0.5,0.75,1 --time 12:00:00
+#   bash submit.sh --account def-yourpi --exp-name si_gems --task crossplay \
+#       --against si_psro_ppo --time 6:00:00
 #
 # Before submitting, on the login node, it builds the environment once
 # (catches missing packages or Atari ROMs now, not after hours in the queue)
-# and refuses run directories that already hold logs unless --overwrite is
-# among the main.py flags -- the same rule main.py enforces, checked early.
-#
-# --task picks what the jobs run (default train):
-#   train      main.py, one array task per (method, seed)
-#   exploit    posthoc.py exploit on those finished runs: approximate NashConv,
-#              one array task per (method, seed, checkpoint); --checkpoints picks
-#              the checkpoints (default final; e.g. 0,0.25,0.5,0.75,1 for a
-#              5-point curve: fractions of the budget; 'all' = every checkpoint
-#              of a run in one task). Needs the runs' checkpoints.
-#   crossplay  posthoc.py crossplay over every finished run of --exp-name / --env:
-#              one task (the matrix covers all runs found; --method only names the job)
-#
-#   bash submit.sh --account def-yourpi --exp-name si_main --method gems --method psro \
-#       --env space_invaders --seeds 0,1,2,3,4 --task exploit --time 12:00:00 \
-#       --checkpoints 0,0.25,0.5,0.75,1
-#
-# Statistics (logs, exploit and cross-play results) go to <out-root>/<exp-name>/,
-# policy checkpoints to <out-root>/checkpoints/<exp-name>/ (or --checkpoint-root),
-# so the statistics can be copied back without the policies.
+# and checks what main.py / posthoc.py would refuse -- seeds that already hold
+# logs (unless --overwrite), settings that differ from the round's, missing
+# checkpoints, results already there -- so nothing fails in the queue.
 #
 # Resources default to CPU-only: SEPSRO's learners run on CPU (rollouts are one
 # step at a time), so a GPU would sit idle. --gpus 1 requests one per task.
@@ -75,8 +84,8 @@ METHODS=()
 ENV_NAME="kuhn_poker"
 BUDGET=100000
 SEEDS="0"
-EXP_NAME="check"
-PASS=()          # everything else goes to main.py untouched
+EXP_NAME=""
+PASS=()          # everything else goes to main.py / posthoc.py untouched
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,28 +111,36 @@ while [[ $# -gt 0 ]]; do
     *)          PASS+=("$1");  shift;;
   esac
 done
-[[ ${#METHODS[@]} -eq 0 ]] && METHODS=(random)
 case "$TASK" in
   train|exploit|crossplay) ;;
   *) echo "--task must be train, exploit or crossplay, got '$TASK'." >&2; exit 1;;
 esac
-
+if [[ -z "$EXP_NAME" ]]; then
+  echo "--exp-name is required: it names the round (e.g. si_gems)." >&2; exit 1
+fi
+if [[ "$TASK" == train && ${#METHODS[@]} -ne 1 ]]; then
+  echo "--task train needs exactly one --method (got ${#METHODS[@]}): a round is one method;" >&2
+  echo "submit another method as another round (another --exp-name)." >&2
+  exit 1
+fi
+if [[ "$TASK" != train && ${#METHODS[@]} -gt 0 ]]; then
+  echo "--method is not used by --task $TASK (the round's config.json has it)." >&2; exit 1
+fi
 if [[ -z "$ACCOUNT" && $DRY_RUN -eq 0 ]]; then
   echo "No --account given and \$SEPSRO_ACCOUNT is unset." >&2
   echo "Alliance clusters reject jobs without one, e.g. --account def-yourpi" >&2
   exit 1
 fi
 
+ROUND_DIR="$OUT_ROOT/$EXP_NAME"
 IFS=',' read -ra SEED_LIST <<< "$SEEDS"
 CKPT_LIST=(final)
 [[ "$TASK" == exploit ]] && IFS=',' read -ra CKPT_LIST <<< "$CHECKPOINTS"
-TASKS=()                                   # "method seed checkpoint" per array index
-for m in "${METHODS[@]}"; do
-  for s in "${SEED_LIST[@]}"; do
-    for c in "${CKPT_LIST[@]}"; do TASKS+=("$m $s $c"); done
-  done
+TASKS=()                                   # "seed checkpoint" per array index
+for s in "${SEED_LIST[@]}"; do
+  for c in "${CKPT_LIST[@]}"; do TASKS+=("$s $c"); done
 done
-[[ "$TASK" == crossplay ]] && TASKS=("all 0 final")   # one job over every finished run
+[[ "$TASK" == crossplay ]] && TASKS=("all final")   # one job over the round
 N_TASKS=${#TASKS[@]}
 
 # ---- checks on the login node, where failures are cheap -------------------- #
@@ -132,75 +149,99 @@ if command -v module >/dev/null 2>&1; then module load "$PYTHON_MODULE"; fi
 source "$VENV/bin/activate" 2>/dev/null || {
   echo "Could not activate $VENV. Run setup_cluster.sh, or pass --venv." >&2; exit 1; }
 
-overwrite=0
-for a in "${PASS[@]+"${PASS[@]}"}"; do [[ "$a" == "--overwrite" ]] && overwrite=1; done
-
-echo "[submit] checking env '$ENV_NAME' and run directories on the login node"
-( cd "$REPO" && python - "$TASK" "$ENV_NAME" "$OUT_ROOT" "$EXP_NAME" "$overwrite" "${TASKS[@]}" <<'PYEOF'
-import os, sys
+echo "[submit] checking round '$EXP_NAME' on the login node"
+( cd "$REPO" && python - "$TASK" "$ROUND_DIR" "${METHODS[0]:-}" "$ENV_NAME" "$BUDGET" \
+    "$OUT_ROOT" "$EXP_NAME" "${#TASKS[@]}" "${TASKS[@]}" "${PASS[@]+"${PASS[@]}"}" <<'PYEOF'
+import json, os, sys
 import warnings
 warnings.filterwarnings('ignore')
-from config import parse_env
+
+task, round_dir, method, env_name, budget, out_root, exp = sys.argv[1:8]
+n = int(sys.argv[8])
+tasks, passed = sys.argv[9:9 + n], sys.argv[9 + n:]
+
+from config import parse_args, parse_env
 from sepsro.envs import make_env
 
-task, env_name, out_root, exp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-overwrite, tasks = sys.argv[5] == '1', sys.argv[6:]
-preset = parse_env(env_name)
+if task != 'train':   # the round says which env
+    try:
+        with open(os.path.join(round_dir, 'round.json'), encoding='utf-8') as handle:
+            env_name = json.load(handle)['env']
+    except OSError:
+        sys.exit(f'[submit] {round_dir} has no round.json: train the round first.')
 try:
-    env = make_env(preset)
+    env = make_env(parse_env(env_name))
     env.reset(seed=0)
     spec = env.spec
     env.close()
 except Exception as exc:
     sys.exit(f'[submit] cannot build env {env_name!r}: {type(exc).__name__}: {exc}\n'
              '         (missing package? for space_invaders run AutoROM on the login node)')
-print(f'[submit] env ok: {spec.backend}, agents {list(spec.agents)}, obs {dict(spec.obs_shape)}')
+print(f'[submit] env ok: {env_name}: {spec.backend}, agents {list(spec.agents)}, '
+      f'obs {dict(spec.obs_shape)}')
 
-env_dir = os.path.join(out_root, exp, preset['name'])
+if task == 'train':
+    import main
+    problems = []
+    for item in tasks:
+        seed = item.split()[0]
+        args = parse_args(['--method', method, '--env', env_name, '--budget', budget,
+                           '--seed', seed, '--exp-name', exp, '--results-dir', out_root, *passed])
+        problem = main.run_conflict(args)
+        if problem:
+            problems.append(problem)
+    if problems:
+        sys.exit('[submit] refused:\n  ' + '\n  '.join(problems))
+    sys.exit()
+
+import posthoc
+overwrite = '--overwrite' in passed
 if task == 'crossplay':
-    from posthoc import find_finished_runs
-    found = find_finished_runs([env_dir])
-    if len(found) < 2:
-        sys.exit(f'[submit] cross-play needs at least two finished runs under {env_dir}; '
-                 f'found {len(found)}.')
-    print(f'[submit] cross-play over {len(found)} finished runs')
+    against = []
+    if '--against' in passed:
+        for a in passed[passed.index('--against') + 1:]:
+            if a.startswith('--'):
+                break
+            against.append(a)
+    mine = posthoc.finished_seeds(round_dir)
+    if len(mine) < 2 and not against:
+        sys.exit(f'[submit] {round_dir} has {len(mine)} finished seed(s): within-round '
+                 'cross-play needs two; add --against <round>.')
+    for other in against:
+        if not posthoc.finished_seeds(posthoc.resolve_round(other, near=round_dir)):
+            sys.exit(f'[submit] round {other} has no finished seed.')
+    out = os.path.join(round_dir, 'stats', 'crossplay')
+    names = (['within'] if len(mine) > 1 else []) + [f'vs_{os.path.basename(a)}' for a in against]
+    done = [x for x in names if os.path.exists(os.path.join(out, f'{x}.json'))]
+    if done and not overwrite:
+        sys.exit(f'[submit] {out} already has {", ".join(done)} (use --overwrite).')
+    print(f'[submit] cross-play: {len(mine)} seed(s), against {against or "no other round"}')
     sys.exit()
 
 problems = []
 for item in tasks:
-    method, seed, which = item.split()
-    run_dir = os.path.join(env_dir, method, f'seed{seed}')
-    if task == 'train':
-        if any(os.path.exists(os.path.join(run_dir, f)) for f in ('eval.jsonl', 'train.jsonl')):
-            problems.append(run_dir)
-        continue
-    import json
-    from posthoc import exploit_path, select_checkpoints
+    seed, which = item.split()
+    run_dir = os.path.join(round_dir, 'stats', f'seed{seed}')
     try:
-        with open(os.path.join(run_dir, 'config.json'), encoding='utf-8') as handle:
-            cfg = json.load(handle)
+        cfg = posthoc._read_config(run_dir)
     except OSError:
         sys.exit(f'[submit] {run_dir} has no config.json: train it first.')
-    for step, name in select_checkpoints(cfg, which):   # exits on a missing checkpoint
-        if os.path.exists(exploit_path(run_dir, name)):
-            problems.append(exploit_path(run_dir, name))
+    for step, name in posthoc.select_checkpoints(cfg, which):   # exits on a missing one
+        if os.path.exists(posthoc.exploit_path(run_dir, name)):
+            problems.append(posthoc.exploit_path(run_dir, name))
 if problems and not overwrite:
-    what = 'logs' if task == 'train' else 'exploit results'
-    sys.exit(f'[submit] these runs already have {what} (use another --exp-name, or --overwrite):\n  '
-             + '\n  '.join(problems))
+    sys.exit('[submit] already scored (use --overwrite):\n  ' + '\n  '.join(problems))
 PYEOF
 )
 
 # ---- build the job script ------------------------------------------------- #
 # Slurm reads #SBATCH lines literally (no shell quoting), so the job name is
 # sanitised; the real --exp-name, parentheses and all, still reaches main.py.
-ENV_DIR_NAME="$(cd "$REPO" && python -c 'import sys; from config import parse_env; print(parse_env(sys.argv[1])["name"])' "$ENV_NAME")"
 SAFE_NAME="${EXP_NAME//[^A-Za-z0-9._-]/_}"
 [[ "$TASK" != train ]] && SAFE_NAME="${SAFE_NAME}_${TASK}"
-METHOD_TAG="$(IFS=-; echo "${METHODS[*]}")"
-mkdir -p "$OUT_ROOT/jobs" "$OUT_ROOT/logs"
-# One script file per submission, so submitting each method separately keeps both.
-JOB="$OUT_ROOT/jobs/${SAFE_NAME}_${METHOD_TAG//[^A-Za-z0-9._-]/_}.sbatch"
+SLURM_DIR="$ROUND_DIR/slurm"
+mkdir -p "$SLURM_DIR"
+JOB="$SLURM_DIR/${SAFE_NAME}.sbatch"
 
 q() { printf '%q' "$1"; }
 TASK_LINES=""
@@ -209,12 +250,11 @@ MAIN_ARGS=""
 for a in "${PASS[@]+"${PASS[@]}"}"; do MAIN_ARGS+=" $(q "$a")"; done
 
 GRES_LINE=""
-RUN_DIR="$(q "$OUT_ROOT/$EXP_NAME/$ENV_DIR_NAME")"
 case "$TASK" in
-  train)     COMMAND="python main.py --method \"\$METHOD\" --seed \"\$SEED\" --env $(q "$ENV_NAME") --budget $(q "$BUDGET") \\
+  train)     COMMAND="python main.py --method $(q "${METHODS[0]}") --seed \"\$SEED\" --env $(q "$ENV_NAME") --budget $(q "$BUDGET") \\
     --exp-name $(q "$EXP_NAME") --results-dir $(q "$OUT_ROOT")${MAIN_ARGS}";;
-  exploit)   COMMAND="python posthoc.py exploit ${RUN_DIR}/\$METHOD/seed\$SEED --checkpoint \"\$CKPT\"${MAIN_ARGS}";;
-  crossplay) COMMAND="python posthoc.py crossplay ${RUN_DIR}${MAIN_ARGS}";;
+  exploit)   COMMAND="python posthoc.py exploit $(q "$ROUND_DIR")/stats/seed\$SEED --checkpoint \"\$CKPT\"${MAIN_ARGS}";;
+  crossplay) COMMAND="python posthoc.py crossplay $(q "$ROUND_DIR")${MAIN_ARGS}";;
 esac
 if [[ "$GPUS" != "0" ]]; then
   GRES_LINE="#SBATCH --gres=gpu:${GPU_TYPE:+${GPU_TYPE}:}${GPUS}"
@@ -228,13 +268,13 @@ cat > "$JOB" <<EOF
 #SBATCH --cpus-per-task=${CPUS}
 #SBATCH --mem=${MEM}
 #SBATCH --time=${TIME}
-#SBATCH --output=${OUT_ROOT}/logs/%x-%A_%a.out
+#SBATCH --output=${SLURM_DIR}/%x-%A_%a.out
 ${GRES_LINE}
 
 set -euo pipefail
 TASKS=(
 ${TASK_LINES})
-read -r METHOD SEED CKPT <<< "\${TASKS[\$SLURM_ARRAY_TASK_ID]}"
+read -r SEED CKPT <<< "\${TASKS[\$SLURM_ARRAY_TASK_ID]}"
 
 module load ${PYTHON_MODULE}
 source $(q "$VENV")/bin/activate
@@ -242,7 +282,7 @@ cd $(q "$REPO")
 # Torch and NumPy otherwise size their thread pools to the whole node.
 export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1}
 
-echo "task    : \$SLURM_ARRAY_TASK_ID  method=\$METHOD seed=\$SEED checkpoint=\$CKPT  on \$(hostname)"
+echo "task    : \$SLURM_ARRAY_TASK_ID  round=$(q "$EXP_NAME") ${TASK} seed=\$SEED checkpoint=\$CKPT  on \$(hostname)"
 echo "commit  : \$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "started : \$(date)"
 
@@ -261,4 +301,4 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 sbatch "$JOB"
-echo "[submit] watch with: squeue -u \$USER     logs in $OUT_ROOT/logs"
+echo "[submit] watch with: squeue -u \$USER     logs in $SLURM_DIR"

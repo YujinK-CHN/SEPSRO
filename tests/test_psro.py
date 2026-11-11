@@ -182,7 +182,7 @@ def test_psro_rps_end_to_end(tmp_path):
                '--psro-sims-per-entry', '100', '--pg-hidden', '32', '32', '--pg-pi-lr', '1e-2',
                '--psro-prd-iterations', '2000', '--eval-metrics', 'nash_conv',
                '--eval-interval', '500', '--results-dir', str(tmp_path)])
-    run_dir = tmp_path / 'check' / 'rps' / 'psro' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     train = [json.loads(line) for line in (run_dir / 'train.jsonl').read_text().splitlines()]
     iterations = [r for r in train if r['kind'] == 'psro_iteration']
     assert [r['iteration'] for r in iterations] == list(range(7))   # setup + 6 iterations
@@ -212,7 +212,7 @@ def test_psro_budget_is_charged(tmp_path):
                '--psro-number-training-episodes', '100000', '--psro-sims-per-entry', '10',
                '--pg-hidden', '16', '--psro-prd-iterations', '100',
                '--eval-episodes', '10', '--results-dir', str(tmp_path)])
-    run_dir = tmp_path / 'check' / 'rps' / 'psro' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     final = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()][-1]
     # The oracle stopped on the budget, long before its episode threshold, and
     # the hard stop leaves no overshoot.
@@ -274,7 +274,7 @@ def test_psro_kuhn_exact_br(tmp_path):
                '--psro-oracle', 'br', '--psro-iterations', '8', '--psro-sims-per-entry', '300',
                '--eval-metrics', 'nash_conv', '--eval-interval', '2000',
                '--results-dir', str(tmp_path)])
-    run_dir = tmp_path / 'check' / 'kuhn_poker' / 'psro' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     nash_convs = [json.loads(line)['nash_conv']
                   for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     assert nash_convs[0] > 0.9 and nash_convs[-1] < 0.15, nash_convs
@@ -325,7 +325,7 @@ def test_psro_runs_on_pettingzoo(tmp_path, env_name, oracle):
                '--psro-prd-iterations', '200', '--eval-episodes', '5',
                '--results-dir', str(tmp_path)])
     name = parse_env(env_name)['name']
-    run_dir = tmp_path / 'check' / name / 'psro' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     train = [json.loads(line) for line in (run_dir / 'train.jsonl').read_text().splitlines()]
     last = [r for r in train if r['kind'] == 'psro_iteration'][-1]
     assert last['iteration'] == 2

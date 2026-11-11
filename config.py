@@ -162,12 +162,11 @@ def _add_run_config(parser):
                             'The common currency that makes methods comparable.')
     group.add_argument('--seed', type=int, default=0)
     group.add_argument('--exp-name', type=str, default='check',
-                       help='Groups runs under results/<exp-name>/.')
+                       help='The round: one method with one configuration in one env, all '
+                            'its seeds, in results/<exp-name>/ (stats/seed<N>/ and '
+                            'checkpoints/seed<N>/). Name it after what defines it, e.g. '
+                            'si_gems_lr1e-3; round.json refuses a seed whose settings differ.')
     group.add_argument('--results-dir', type=str, default='results')
-    group.add_argument('--checkpoint-root', type=str, default=None,
-                       help='Where policy checkpoints go, as <root>/<exp-name>/<env>/<method>/'
-                            'seed<seed>/ -- a tree apart from the logs, so the statistics can '
-                            'be copied without the policies. Default <results-dir>/checkpoints.')
     group.add_argument('--checkpoint-every', type=int, default=1,
                        help='Save the evaluated policy at every N-th evaluation point (1 = all, '
                             "0 = none); the final one is always saved. posthoc.py exploit "
@@ -443,11 +442,22 @@ def resolve(args):
             args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         except ImportError:
             args.device = 'cpu'
-    run = (args.exp_name, args.env_name, args.method, f'seed{args.seed}')
-    args.run_dir = os.path.join(args.results_dir, *run)
-    root = args.checkpoint_root or os.path.join(args.results_dir, 'checkpoints')
-    args.checkpoint_dir = os.path.join(root, *run)
+    args.round_dir = os.path.join(args.results_dir, args.exp_name)
+    args.run_dir = os.path.join(args.round_dir, STATS_DIR, f'seed{args.seed}')
+    args.checkpoint_dir = checkpoint_dir_of(args.run_dir)
     return args
+
+
+# A round: results/<exp-name>/{round.json, stats/seed<N>/, checkpoints/seed<N>/}.
+STATS_DIR = 'stats'
+CHECKPOINTS_DIR = 'checkpoints'
+
+
+def checkpoint_dir_of(run_dir):
+    """<round>/stats/seed<N> -> <round>/checkpoints/seed<N> (wherever the round now lives)."""
+    run_dir = os.path.normpath(run_dir)
+    return os.path.join(os.path.dirname(os.path.dirname(run_dir)), CHECKPOINTS_DIR,
+                        os.path.basename(run_dir))
 
 
 def save_config(args, path):

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Master launcher.
+# Local launcher: the seeds of one round (one method, one configuration, one
+# env -> results/<exp-name>/, see main.py). Another method or configuration is
+# another round: run it again with another --exp-name.
 #
 # Four knobs, because only these change between runs of a suite:
 #
-#   --method    random | psro | ppo | gems   (repeatable: --method psro --method ppo)
+#   --method    random | psro | ppo | gems   (one per round)
 #   --env       a key of ENV_PRESETS in config.py, or backend:id
 #   --budget    training budget in ENV STEPS -- the common currency that makes
 #               methods comparable: at the same --budget every method has
@@ -17,8 +19,8 @@
 #
 # Usage:
 #   bash run.sh --method random --env kuhn_poker --budget 100000 --seeds 0,1,2
-#   bash run.sh --method psro --method ppo --env leduc_poker --budget 1000000 --seeds 0,1,2 \
-#        --run-mode parallel --exp-name main
+#   bash run.sh --method psro --env leduc_poker --budget 1000000 --seeds 0,1,2 \
+#        --run-mode parallel --exp-name leduc_psro
 
 set -euo pipefail
 
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ ${#METHODS[@]} -eq 0 ]] && METHODS=(random)
+if [[ ${#METHODS[@]} -ne 1 ]]; then
+    echo "One --method per round (got ${#METHODS[@]}); run another method with another --exp-name." >&2
+    exit 1
+fi
 
 cd "$(dirname "$0")"
 IFS=',' read -ra SEED_LIST <<< "$SEEDS"
@@ -58,7 +64,7 @@ for method in "${METHODS[@]}"; do
         echo ">> ${cmd[*]}"
         if [[ "$RUN_MODE" == "parallel" ]]; then
             log_dir="results/$EXP_NAME/logs"; mkdir -p "$log_dir"
-            "${cmd[@]}" > "$log_dir/${ENV//[:\/@]/_}_${method}_seed${seed}.log" 2>&1 &
+            "${cmd[@]}" > "$log_dir/seed${seed}.log" 2>&1 &
             pids+=($!)
         else
             "${cmd[@]}"

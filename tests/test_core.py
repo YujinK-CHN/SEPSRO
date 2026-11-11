@@ -186,16 +186,17 @@ def test_main_random_end_to_end(tmp_path):
     env = 'connect_four' if HAS_PZ else 'rps'
     main.main(['--method', 'random', '--env', env, '--budget', '300',
                '--eval-episodes', '5', '--results-dir', str(tmp_path)])
-    run_dir = tmp_path / 'check' / env / 'random' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     records = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     assert records[0]['budget_used'] == 0
     assert records[-1]['final'] and records[-1]['budget_used'] == 300   # hard stop
     # Before training, every --eval-interval (300 / 20 = 15) steps, and at the end.
     assert [r['budget_used'] for r in records] == list(range(0, 300, 15)) + [300]
-    # Policies go to their own tree; the statistics directory holds none.
-    ckpt_dir = tmp_path / 'checkpoints' / 'check' / env / 'random' / 'seed0'
+    # Policies go to the round's checkpoints/; its stats/ holds none.
+    assert json.loads((tmp_path / 'check' / 'round.json').read_text())['method'] == 'random'
+    ckpt_dir = tmp_path / 'check' / 'checkpoints' / 'seed0'
     assert (ckpt_dir / 'final.pkl').exists()
-    assert not list(run_dir.glob('*.pkl'))
+    assert not list((tmp_path / 'check' / 'stats').rglob('*.pkl'))
     names = [r.get('checkpoint') for r in records]
     assert names == [f'step_{r["budget_used"]}' for r in records[:-1]] + ['final']
     assert sorted(p.stem for p in ckpt_dir.glob('*.pkl')) == sorted(names)
@@ -209,6 +210,26 @@ def test_stub_methods_fail_loudly(method, tmp_path):
     with pytest.raises(NotImplementedError):
         main.main(['--method', method, '--env', 'rps', '--budget', '10',
                    '--results-dir', str(tmp_path)])
+
+
+def test_a_round_holds_one_configuration(tmp_path):
+    import main
+    base = ['--method', 'random', '--env', 'rps', '--budget', '50', '--eval-episodes', '2',
+            '--results-dir', str(tmp_path), '--exp-name', 'r']
+    main.main(base)
+    main.main(base + ['--seed', '1'])                       # another seed: same round
+    main.main(base + ['--seed', '2', '--device', 'cpu'])    # not a round setting
+    for other in (['--seed', '3', '--budget', '60'], ['--seed', '3', '--env', 'matching_pennies'],
+                  ['--seed', '3', '--method', 'psro']):
+        with pytest.raises(SystemExit, match='other settings'):
+            main.main(base + other)
+    assert sorted(os.listdir(tmp_path / 'r' / 'stats')) == ['seed0', 'seed1', 'seed2']
+    # Once no seed of the old round is left, the name can hold a new configuration.
+    for seed in ('seed0', 'seed1', 'seed2'):
+        for f in ('eval.jsonl', 'train.jsonl'):
+            os.remove(tmp_path / 'r' / 'stats' / seed / f)
+    main.main(base + ['--budget', '60', '--overwrite'])   # its old checkpoints are replaced
+    assert json.loads((tmp_path / 'r' / 'round.json').read_text())['budget'] == 60
 
 
 def test_every_preset_is_well_formed():
@@ -225,7 +246,7 @@ def test_rerun_into_same_run_dir_is_refused(tmp_path):
     with pytest.raises(SystemExit):
         main.main(argv)                      # would otherwise append to the same eval.jsonl
     main.main(argv + ['--overwrite'])
-    run_dir = tmp_path / 'check' / 'rps' / 'random' / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     records = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     assert sum(r['final'] for r in records) == 1   # only the latest run's records remain
 
@@ -247,7 +268,7 @@ def test_eval_records_carry_the_method_variant(tmp_path, method, argv, expected)
     import main
     main.main(['--method', method, '--env', 'rps', '--budget', '10000000', '--eval-episodes', '2',
                '--results-dir', str(tmp_path), *argv])
-    run_dir = tmp_path / 'check' / 'rps' / method / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     for line in (run_dir / 'eval.jsonl').read_text().splitlines():
         assert expected.items() <= json.loads(line).items()
 

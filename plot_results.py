@@ -7,17 +7,19 @@ currency that makes methods comparable. Results of posthoc.py exploit
 (<run>/exploit/*.json) join the run as the metric approx_nash_conv, one point
 per scored checkpoint, so scoring several checkpoints gives a curve.
 
-    python plot_results.py results/main
-    python plot_results.py results/main --metric vs_random/mean --metric self_play/first_0
+    python plot_results.py results/kuhn_psro results/kuhn_gems    # rounds to compare
+    python plot_results.py results/si_psro --metric vs_random/mean --metric self_play/first_0
     python plot_results.py results --filter env=space_invaders --band minmax --out fig.pdf
-    python plot_results.py results/main --table          # the numbers, no figure
-    python plot_results.py results/main --list-metrics   # what the logs contain
-    python plot_results.py results/main --train          # + training diagnostics figure
+    python plot_results.py results/kuhn_psro --table      # the numbers, no figure
+    python plot_results.py results --list-metrics         # every round and its metrics
+    python plot_results.py results/kuhn_psro --train      # + training diagnostics figure
 
-A series is one experimental arm: experiment name (the <exp-name> directory),
-env, method, and the method's variant fields that main.py stamps on every eval
-record (e.g. PSRO's oracle, GEMS's generator). Every seed of an arm is one run.
-Legend names show only the fields that differ between the plotted series.
+Takes rounds (results/<exp-name>/, or any directory above them). A series is
+one round: its seeds are averaged. (Within a round, the env, method and the
+method's variant fields stamped on every eval record -- PSRO's oracle, GEMS's
+generator -- also split series, should a round ever hold two.) Legend names
+are the round names; without rounds, the fields that differ between series.
+The figure goes to <results>/plots/ (named after the rounds) unless --out.
 
 Seeds rarely share exact x-values (an evaluation fires at the first episode end
 past each watermark), so each seed is interpolated onto a common grid over the
@@ -87,15 +89,19 @@ def read_jsonl(path):
     return records
 
 
-def find_runs(root):
-    """Every directory under `root` holding an eval.jsonl."""
-    return sorted(dirpath for dirpath, _, files in os.walk(root) if 'eval.jsonl' in files)
+def find_runs(roots):
+    """Every directory under `roots` (one path or several) holding an eval.jsonl."""
+    roots = [roots] if isinstance(roots, str) else list(roots)
+    return sorted({dirpath for root in roots for dirpath, _, files in os.walk(root)
+                   if 'eval.jsonl' in files})
 
 
 def _experiment_of(run_dir):
-    """<exp-name> from .../<exp-name>/<env>/<method>/seed<N>, else the parent path."""
-    parts = os.path.normpath(run_dir).split(os.sep)
-    return parts[-4] if len(parts) >= 4 else os.path.dirname(run_dir)
+    """The round (<exp-name>) of .../<exp-name>/stats/seed<N>, else the parent path."""
+    parent = os.path.dirname(os.path.normpath(run_dir))
+    if os.path.basename(parent) == 'stats':
+        return os.path.basename(os.path.dirname(parent))
+    return parent
 
 
 def _is_number(value):
@@ -143,8 +149,8 @@ def load_run(run_dir):
             'train': read_jsonl(os.path.join(run_dir, 'train.jsonl')), 'metrics': metrics}
 
 
-def load_runs(root, filters=()):
-    runs = [r for r in (load_run(d) for d in find_runs(root)) if r]
+def load_runs(roots, filters=()):
+    runs = [r for r in (load_run(d) for d in find_runs(roots)) if r]
     for key, value in filters:
         runs = [r for r in runs if str(r['arm'].get(key)) == value]
     return runs
@@ -161,6 +167,9 @@ def group_runs(runs):
 def series_names(arms):
     """Readable names showing only the fields that differ between arms."""
     arms = [dict(a) for a in arms]
+    rounds = [a.get('experiment') for a in arms]
+    if len(set(map(str, rounds))) == len(arms):   # one series per round: its name says it
+        return [str(r) for r in rounds]
     keys = sorted({k for a in arms for k in a})
     core = ('experiment', 'env', 'method')
 
@@ -377,20 +386,36 @@ def default_metric(runs):
     return sorted(available)[0]
 
 
+def default_out(runs, metrics):
+    """<results>/plots/<round>_vs_<round>...[__<metric>].png, outside every round."""
+    run_dirs = [os.path.normpath(r['dir']) for r in runs]
+    in_rounds = all(os.path.basename(os.path.dirname(d)) == 'stats' for d in run_dirs)
+    if in_rounds:   # .../<results>/<round>/stats/seed<N>: next to the (first) round
+        base = os.path.dirname(os.path.dirname(os.path.dirname(run_dirs[0])))
+        name = '_vs_'.join(sorted({r['arm']['experiment'] for r in runs}))
+    else:
+        base, name = os.path.commonpath(run_dirs), 'plot'
+    suffix = '' if metrics in ([], None) else '__' + '+'.join(m.replace('/', '-') for m in metrics)
+    name = (name + suffix)[:150]
+    return os.path.join(base, 'plots', f'{name}.png')
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('root', help='results directory to search for eval.jsonl files')
+    p.add_argument('roots', nargs='+',
+                   help='rounds (results/<exp-name>), or directories above them, to search '
+                        'for eval.jsonl files')
     p.add_argument('--metric', action='append', default=None,
                    help='metric to plot (repeat for several panels). Default: nash_conv, '
-                        'else vs_random/mean.')
+                        'else approx_nash_conv, else vs_random/mean.')
     p.add_argument('--filter', action='append', default=[], metavar='KEY=VALUE',
                    help='keep only runs whose arm has this field value, e.g. env=space_invaders, '
                         'method=gems, oracle=pg, experiment=main (repeatable)')
     p.add_argument('--band', default='std', choices=['std', 'minmax', 'iqr', 'none'],
                    help='spread across seeds')
-    p.add_argument('--out', default=None, help='image path (.png / .pdf / .svg); '
-                                               'default <root>/plot.png')
+    p.add_argument('--out', default=None, help='image path (.png / .pdf / .svg); default '
+                                               '<results>/plots/<rounds>.png')
     p.add_argument('--mode', default='light', choices=['light', 'dark'])
     p.add_argument('--title', default=None)
     p.add_argument('--table', action='store_true', help='print the numbers instead of plotting')
@@ -400,9 +425,10 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     filters = [tuple(f.split('=', 1)) for f in args.filter]
-    runs = load_runs(args.root, filters)
+    runs = load_runs(args.roots, filters)
     if not runs:
-        raise SystemExit(f'No eval.jsonl under {args.root}' + (f' matching {args.filter}' if filters else ''))
+        raise SystemExit(f'No eval.jsonl under {" ".join(args.roots)}'
+                         + (f' matching {args.filter}' if filters else ''))
     groups = group_runs(runs)
     names = dict(zip(groups, series_names(groups)))
 
@@ -431,7 +457,8 @@ def main(argv=None):
             print_table(series, metric, args.band)
         return
 
-    out = args.out or os.path.join(args.root, 'plot.png')
+    out = args.out or default_out(runs, metrics)
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     render(per_metric, out, args.mode, args.title)
     print(f'wrote {out}')
     if args.train:

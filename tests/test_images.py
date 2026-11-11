@@ -176,7 +176,7 @@ def test_gems_on_images(tmp_path, generator, monkeypatch):
                '--gems-mutation-pool', '1', '--gems-random-pool', '1', '--gems-abr-steps', '1',
                '--gems-abr-batch-anchors', '2', '--gems-hyper-hidden', '8',
                '--gems-policy-hidden', '8', '--eval-episodes', '1'])
-    assert (tmp_path / 'check' / 'fake_atari' / 'gems' / 'seed0' / 'eval.jsonl').exists()
+    assert (tmp_path / 'check' / 'stats' / 'seed0' / 'eval.jsonl').exists()
 
 
 def _has_space_invaders():

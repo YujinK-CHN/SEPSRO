@@ -17,7 +17,7 @@ import plot_results as pr  # noqa: E402
 
 
 def _write_run(root, exp, env, method, seed, points, variant=None, train=None, truncated=False):
-    run_dir = os.path.join(root, exp, env, method, f'seed{seed}')
+    run_dir = os.path.join(root, exp, 'stats', f'seed{seed}')
     os.makedirs(run_dir)
     meta = {'method': method, 'env': env, 'seed': seed, 'budget': 1000, **(variant or {})}
     lines = [json.dumps({**meta, 'budget_used': x, 'budget_fraction': x / 1000,
@@ -38,19 +38,19 @@ def _write_run(root, exp, env, method, seed, points, variant=None, train=None, t
 def results(tmp_path):
     root = str(tmp_path)
     for seed, offset in ((0, 0.0), (1, 2.0)):
-        _write_run(root, 'main', 'kuhn', 'psro', seed, [(0, 1 + offset), (100, 3 + offset)],
+        _write_run(root, 'kuhn_psro', 'kuhn', 'psro', seed, [(0, 1 + offset), (100, 3 + offset)],
                    variant={'oracle': 'pg', 'meta_solver': 'auto'},
                    train=[{'kind': 'oracle_episode', 'iteration': 1, 'seat': 'p0', 'return': r}
                           for r in (1.0, 3.0)])
-    # A second arm of the same method lives under its own --exp-name, as main.py requires.
-    _write_run(root, 'br_run', 'kuhn', 'psro', 0, [(0, 10.0), (100, 10.0)],
+    # Another configuration of the same method is another round, as main.py requires.
+    _write_run(root, 'kuhn_psro_br', 'kuhn', 'psro', 0, [(0, 10.0), (100, 10.0)],
                variant={'oracle': 'br', 'meta_solver': 'auto'})
     # Two GEMS seeds whose eval points fall at different env steps.
-    _write_run(root, 'main', 'kuhn', 'gems', 0, [(0, 0.0), (50, 5.0), (100, 10.0)],
+    _write_run(root, 'kuhn_gems', 'kuhn', 'gems', 0, [(0, 0.0), (50, 5.0), (100, 10.0)],
                variant={'generator': 'hyper'}, truncated=True,
                train=[{'kind': 'gems_iteration', 'iteration': 1, 'mixture_value': {'p0': 0.5},
                        'oracle': {'p0': {'mean': 0.7}}}])
-    _write_run(root, 'main', 'kuhn', 'gems', 1, [(10, 1.0), (110, 11.0)],
+    _write_run(root, 'kuhn_gems', 'kuhn', 'gems', 1, [(10, 1.0), (110, 11.0)],
                variant={'generator': 'hyper'})
     return root
 
@@ -59,18 +59,29 @@ def test_arms_are_split_by_variant(results):
     groups = pr.group_runs(pr.load_runs(results))
     assert sorted(len(m) for m in groups.values()) == [1, 2, 2]   # br, pg, gems
     names = sorted(pr.series_names(groups))
-    # env / meta_solver are the same everywhere, so hidden; GEMS has no oracle field.
-    assert names == ['br_run | psro | oracle=br', 'main | gems', 'main | psro | oracle=pg']
+    # One series per round, named after it.
+    assert names == ['kuhn_gems', 'kuhn_psro', 'kuhn_psro_br']
+    # Without rounds (or two series in one), the differing fields name them.
+    arms = [dict(a, experiment='x') for a in groups]
+    assert sorted(pr.series_names(arms)) == ['gems', 'psro | oracle=br', 'psro | oracle=pg']
+
+
+def test_rounds_and_default_output(results):
+    two = [os.path.join(results, 'kuhn_psro'), os.path.join(results, 'kuhn_gems')]
+    runs = pr.load_runs(two)
+    assert {r['arm']['experiment'] for r in runs} == {'kuhn_psro', 'kuhn_gems'}
+    assert pr.default_out(runs, ['vs_random/mean']) == os.path.join(
+        results, 'plots', 'kuhn_gems_vs_kuhn_psro__vs_random-mean.png')
 
 
 def test_aggregate_exact_and_interpolated(results):
     groups = pr.group_runs(pr.load_runs(results))
     by_name = dict(zip(pr.series_names(groups), groups.values()))
-    x, centre, lo, hi, n = pr.aggregate(by_name['main | psro | oracle=pg'], 'vs_random/mean')
+    x, centre, lo, hi, n = pr.aggregate(by_name['kuhn_psro'], 'vs_random/mean')
     np.testing.assert_allclose(x, [0, 100])
     np.testing.assert_allclose(centre, [2, 4])                       # mean of 1,3 and 3,5
     np.testing.assert_allclose(hi - centre, [1, 1])                  # std
-    x, centre, _, _, n = pr.aggregate(by_name['main | gems'], 'vs_random/mean', band='none')
+    x, centre, _, _, n = pr.aggregate(by_name['kuhn_gems'], 'vs_random/mean', band='none')
     assert n == 2 and x[0] == 10 and x[-1] == 100                    # overlap of both seeds
     np.testing.assert_allclose(centre, x / 10)                       # both seeds lie on y = x/10
 

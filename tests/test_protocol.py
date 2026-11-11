@@ -81,7 +81,7 @@ def test_methods_scored_at_fixed_points_and_stop_exactly(tmp_path, method):
     import main
     main.main(['--method', method, '--env', 'rps', '--budget', '2000', '--eval-interval', '250',
                '--eval-episodes', '5', '--results-dir', str(tmp_path), *_TINY[method]])
-    run_dir = tmp_path / 'check' / 'rps' / method / 'seed0'
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
     records = [json.loads(line) for line in (run_dir / 'eval.jsonl').read_text().splitlines()]
     # Same x-positions for every method, whatever its iteration length.
     assert [r['budget_used'] for r in records] == list(range(0, 2000, 250)) + [2000]
@@ -91,8 +91,7 @@ def test_methods_scored_at_fixed_points_and_stop_exactly(tmp_path, method):
     for stream in (records, train):
         assert all('wall_time' in r and 'elapsed_s' in r for r in stream)
         assert [r['elapsed_s'] for r in stream] == sorted(r['elapsed_s'] for r in stream)
-    policies = main.load_policies(tmp_path / 'checkpoints' / 'check' / 'rps' / method / 'seed0'
-                                  / 'final.pkl')
+    policies = main.load_policies(tmp_path / 'check' / 'checkpoints' / 'seed0' / 'final.pkl')
     assert set(policies) == {'player_0', 'player_1'}
     rng = np.random.default_rng(0)
     for policy in policies.values():
@@ -154,18 +153,20 @@ def test_every_override_names_a_real_setting():
 
 
 # ---------------------------------------------------------------- posthoc
-def _fake_run(path, actions, method='fixed', seed=0, steps=()):
-    """A run on RPS (budget 100) whose saved policies always play `actions` (one per seat).
+def _fake_run(round_dir, actions, method='fixed', seed=0, steps=()):
+    """Seed `seed` of a round on RPS (budget 100) whose policies always play `actions`.
 
-    The checkpoints (final.pkl, and step_<N>.pkl for N in `steps`) go to a
-    separate directory, as main.py writes them.
+    Laid out as main.py writes it: <round>/stats/seed<N>/config.json and
+    <round>/checkpoints/seed<N>/ with final.pkl and step_<N>.pkl for N in `steps`.
+    Returns the run's stats directory.
     """
+    path = round_dir / 'stats' / f'seed{seed}'
     path.mkdir(parents=True)
-    ckpt_dir = path.parent / f'{path.name}_checkpoints'
-    ckpt_dir.mkdir()
+    ckpt_dir = round_dir / 'checkpoints' / f'seed{seed}'
+    ckpt_dir.mkdir(parents=True)
     (path / 'config.json').write_text(json.dumps({
-        'env': 'rps', 'seed': seed, 'method': method, 'exp_name': 'test', 'budget': 100,
-        'max_episode_steps': None, 'obs_type': 'info_state', 'checkpoint_dir': str(ckpt_dir)}))
+        'env': 'rps', 'seed': seed, 'method': method, 'exp_name': round_dir.name, 'budget': 100,
+        'max_episode_steps': None, 'obs_type': 'info_state'}))
     policies = {f'player_{i}': FixedActionPolicy(a) for i, a in enumerate(actions)}
     for name in ['final'] + [f'step_{n}' for n in steps]:
         with open(ckpt_dir / f'{name}.pkl', 'wb') as handle:
@@ -196,7 +197,7 @@ def test_checkpoint_selection():
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
         run = _fake_run(Path(tmp) / 'run', [0, 0], steps=(0, 26, 50, 77))
-        cfg = json.loads((run / 'config.json').read_text())
+        cfg = posthoc._read_config(str(run))
         pick = lambda which: [name for _, name in posthoc.select_checkpoints(cfg, which)]
         assert pick('final') == ['final'] and pick('step_26') == ['step_26']
         assert pick('all') == ['step_0', 'step_26', 'step_50', 'step_77', 'final']
@@ -212,7 +213,7 @@ def test_exploit_scores_several_checkpoints_and_plot_draws_them(tmp_path):
     pytest.importorskip('torch')
     import plot_results
     import posthoc
-    run = _fake_run(tmp_path / 'test' / 'rps' / 'fixed' / 'seed0', [0, 0], steps=(0, 50))
+    run = _fake_run(tmp_path / 'test', [0, 0], steps=(0, 50))
     (run / 'eval.jsonl').write_text(json.dumps({'method': 'fixed', 'env': 'rps', 'seed': 0,
                                                 'budget': 100, 'budget_used': 0,
                                                 'vs_random/mean': 0.0}) + '\n')
@@ -230,36 +231,47 @@ def test_exploit_scores_several_checkpoints_and_plot_draws_them(tmp_path):
     assert list(centre) == pytest.approx([r['approx_nash_conv'] for r in results])
 
 
-def test_checkpoint_every_and_root(tmp_path):
+def test_checkpoint_every_and_overwrite(tmp_path):
     import main
-    main.main(['--method', 'random', '--env', 'rps', '--budget', '100', '--eval-interval', '10',
-               '--eval-episodes', '2', '--results-dir', str(tmp_path / 'stats'),
-               '--checkpoint-root', str(tmp_path / 'policies'), '--checkpoint-every', '3'])
-    ckpt_dir = tmp_path / 'policies' / 'check' / 'rps' / 'random' / 'seed0'
+    argv = ['--method', 'random', '--env', 'rps', '--budget', '100', '--eval-interval', '10',
+            '--eval-episodes', '2', '--results-dir', str(tmp_path)]
+    main.main(argv + ['--checkpoint-every', '3'])
+    ckpt_dir = tmp_path / 'check' / 'checkpoints' / 'seed0'
     assert sorted(p.stem for p in ckpt_dir.glob('*.pkl')) == sorted(
         ['step_0', 'step_30', 'step_60', 'step_90', 'final'])
-    assert not list((tmp_path / 'stats').rglob('*.pkl'))
     # A re-run refuses while old checkpoints are there, and --overwrite clears them.
-    argv = ['--method', 'random', '--env', 'rps', '--budget', '100', '--eval-interval', '10',
-            '--eval-episodes', '2', '--results-dir', str(tmp_path / 'stats'),
-            '--checkpoint-root', str(tmp_path / 'policies'), '--checkpoint-every', '0']
-    (tmp_path / 'stats' / 'check' / 'rps' / 'random' / 'seed0' / 'eval.jsonl').unlink()
-    (tmp_path / 'stats' / 'check' / 'rps' / 'random' / 'seed0' / 'train.jsonl').unlink()
+    run_dir = tmp_path / 'check' / 'stats' / 'seed0'
+    (run_dir / 'eval.jsonl').unlink()
+    (run_dir / 'train.jsonl').unlink()
     with pytest.raises(SystemExit):
-        main.main(argv)
-    main.main(argv + ['--overwrite'])
+        main.main(argv + ['--checkpoint-every', '3'])
+    main.main(argv + ['--checkpoint-every', '0', '--overwrite'])   # alone in its round: allowed
     assert [p.stem for p in ckpt_dir.glob('*.pkl')] == ['final']
 
 
-def test_crossplay_known_payoffs(tmp_path):
+def test_crossplay_within_and_against_rounds(tmp_path):
     import posthoc
-    _fake_run(tmp_path / 'a' / 'seed0', [0, 0], method='rock')
-    _fake_run(tmp_path / 'b' / 'seed0', [1, 1], method='paper')
-    per_run, per_method = posthoc.crossplay([str(tmp_path)], episodes=5)
-    # Rock's seats only ever meet paper: -1 each; paper's +1.
-    assert per_method['rock']['mean'] == -1.0 and per_method['paper']['mean'] == 1.0
-    assert (tmp_path / 'crossplay.json').exists()
-    assert all(r['self_play'] == [0.0, 0.0] for r in per_run.values())
+    # Round 'mixed': seed 0 always rock, seed 1 always paper. Round 'rock': two rock seeds.
+    _fake_run(tmp_path / 'mixed', [0, 0], seed=0)
+    _fake_run(tmp_path / 'mixed', [1, 1], seed=1)
+    _fake_run(tmp_path / 'rock', [0, 0], method='rock', seed=0)
+    _fake_run(tmp_path / 'rock', [0, 0], method='rock', seed=1)
+    results = posthoc.crossplay(str(tmp_path / 'mixed'), against=['rock'], episodes=5)
+    within, vs = results['within'], results['vs_rock']
+    # Within: the rock seed only meets paper (-1 in both seats), the paper seed rock (+1).
+    assert within['per_seed'][0]['mean_vs_others'] == -1.0
+    assert within['per_seed'][1]['mean_vs_others'] == 1.0
+    assert within['summary']['mean'] == 0.0 and within['per_seed'][0]['self_play'] == [0.0, 0.0]
+    # Against the rock round: rock ties (0), paper wins (+1); in both seat assignments.
+    assert vs['per_seed'][0]['mean_vs_them'] == 0.0 and vs['per_seed'][1]['mean_vs_them'] == 1.0
+    assert vs['per_seed'][1]['their_return'] == -1.0 and vs['against_method'] == 'rock'
+    out = tmp_path / 'mixed' / 'stats' / 'crossplay'
+    assert sorted(os.listdir(out)) == ['vs_rock.json', 'within.json']
+    with pytest.raises(SystemExit):              # no silent overwrite
+        posthoc.crossplay(str(tmp_path / 'mixed'), episodes=5)
+    with pytest.raises(SystemExit):              # one seed and no other round: nothing to do
+        _fake_run(tmp_path / 'single', [0, 0])
+        posthoc.crossplay(str(tmp_path / 'single'), episodes=5)
 
 
 def test_gems_prints_progress(tmp_path, capsys):
@@ -281,7 +293,7 @@ def test_gems_prints_progress(tmp_path, capsys):
         return [{k: v for k, v in r.items() if k not in ('wall_time', 'elapsed_s', 'phase_seconds')}
                 for r in rows]
     for name in ('eval.jsonl', 'train.jsonl'):
-        on, off = (strip(tmp_path / x / 'check' / 'rps' / 'gems' / 'seed0' / name) for x in ('on', 'off'))
+        on, off = (strip(tmp_path / x / 'check' / 'stats' / 'seed0' / name) for x in ('on', 'off'))
         assert on == off
 
 
