@@ -8,7 +8,9 @@ Status:
 - **`psro`** works. It follows OpenSpiel's `psro_v2` in structure and defaults
   (re-implemented on this codebase's env interface, so it also runs on
   PettingZoo), with psro_v2's three oracles: RL with policy gradient (`pg`),
-  RL with DQN (`dqn`), and exact best response (`br`, OpenSpiel only).
+  RL with DQN (`dqn`), and exact best response (`br`, OpenSpiel only), plus
+  RL with PPO (`ppo`, not in psro_v2) for comparisons where PSRO and GEMS use
+  the same kind of best-response learner.
 - **`gems`** works: the Generative Evolutionary Meta-Solver (Sharma et al.,
   TMLR 2026), per-player form, with the paper's Kuhn-poker defaults. See below.
 - `ppo` (self-play) is a registered placeholder that raises
@@ -148,7 +150,7 @@ players, 6 actions each, both scoring against the invaders (not zero-sum: use
 PRD / GEMS's OMWU, not the Nash LP). No exact NashConv exists; evaluate with
 `vs_random` / `self_play`.
 
-Image observations go through a Nature-DQN CNN (`learners/networks.py`) in PG,
+Image observations go through a Nature-DQN CNN (`learners/networks.py`) in PG, PPO,
 DQN and GEMS (for GEMS's `hyper` generator the CNN torso is shared and the
 policy head is generated from z). The hypernetwork generates each distinct
 code's weights once per batch, not once per transition, which on Space Invaders
@@ -170,6 +172,18 @@ payoff entry; PRD with 50,000 iterations and gamma 1e-10; at most 100
 iterations. The DQN oracle uses the example's 4x256 network, batch 32, lr 1e-2,
 target update every 1000 steps and learning every 10.
 
+`--psro-oracle ppo` (not in psro_v2) is the same RL oracle and schedule with
+the repo's PPO learner (CleanRL-style, Nature CNN on frames): each finished
+episode's transitions go into a rollout buffer, every `--ppo-rollout-steps`
+transitions trigger one PPO update (`--ppo-epochs` x `--ppo-minibatches`,
+clipped surrogate, GAE), and the last partial rollout of a response is spent
+on one more update. It is there so PSRO can be compared with GEMS, whose
+ABR-TR is PPO, with the same kind of learner. It takes the `ppo` group's
+settings (with `ENV_OVERRIDES`); `--psro-ppo-lr`, `-rollout-steps`, `-epochs`,
+`-minibatches`, `-clip`, `-ent-coef` replace them for the oracle only, so
+tuning the oracle never changes the post-hoc scorer, which uses the `ppo`
+group.
+
 Where this differs from psro_v2, on purpose:
 
 | | psro_v2 | here | why |
@@ -177,6 +191,7 @@ Where this differs from psro_v2, on purpose:
 | Learners | JAX (`open_spiel/python/jax`) | PyTorch ports, same algorithms | one framework for the codebase |
 | Default meta-solver | `alpharank` | `auto` (Nash LP for 2-player zero-sum, else PRD) | alpharank not ported yet |
 | Default oracle | `BR` | `pg` | BR exists only for OpenSpiel; `pg` runs everywhere |
+| PPO oracle | -- | `--psro-oracle ppo` | same learner family as GEMS's ABR-TR, for oracle-aligned comparisons |
 | PG policy loss | softmax over all actions | illegal actions masked | untrained Q of illegal actions otherwise pulls probability to them |
 | Stopping | 100 iterations | the env-step budget only, exactly (`--psro-iterations` is an optional cap) | the budget is the cross-method currency |
 
@@ -272,7 +287,8 @@ the same invaders; in the test run one trained player's score fell while the
 other's rose), so there is no winner and raw score in self-play says little
 about equilibrium play. *Approximate NashConv* is the same quantity as the
 poker headline: for each seat a fresh PPO learner (config groups `exploit`
-and `ppo`; 5M steps per seat, Atari PPO clip 0.1) trains a best response to
+and `ppo`; 5M steps per seat, Atari PPO clip 0.1, rewards scaled by 0.01
+for training) trains a best response to
 the run's final policy of the other seat, and the gains in return over the
 final policy are summed. It is a lower bound (an RL best response can be
 weaker than the exact one) and is only comparable because every run gets the
@@ -294,6 +310,11 @@ starting points for the pilot, every other setting is the published default)
 | `--gems-oracle-opponents` x `--gems-oracle-rollouts` | 8 x 2 | 16 x 4 | (same) |
 | `--gems-eta` | 0.03 | 0.5 | with ~20 iterations and value gaps of ~0.05, 0.03 left sigma uniform in the test run |
 | `--gems-abr-lr` | 2e-4 | 1e-3 | the test run's ABR-TR moved the policy by KL ~1e-4 per iteration |
+| `--ppo-clip` | 0.2 | 0.1 | CleanRL's Atari PPO value |
+| `--ppo-reward-scale` | 1 | 0.01 | raw scores are 5-200 per hit (~500 per episode), which left the PPO critic's loss in the hundreds; a constant factor keeps the objective -- the score -- unchanged (sign clipping, CleanRL's Atari choice, would make the learner maximise hits, so it would not be a best response in the game's payoffs) |
+
+The two `ppo` rows apply to the post-hoc best response and to `--psro-oracle
+ppo` alike; GEMS normalises its own rewards to [0, 1] (see GEMS above).
 
 **Pilot (equal tuning effort).** Before the main runs: per method, the same
 number of short runs (1 seed, outside 0-4) varying only the settings above,
@@ -321,13 +342,13 @@ sepsro/
   rollout.py              play_episode(): the only env loop; per-agent credit assignment
   meta_game.py            Population + cached empirical PayoffTable
   meta_solvers.py         payoff tensor -> meta-strategy (uniform, nash, prd, auto)
-  oracles.py              RLOracle (pg / dqn) and exact BestResponseOracle
+  oracles.py              RLOracle (pg / dqn / ppo) and exact BestResponseOracle
   learners/
     pg.py                 QPG / RPG / RM / A2C (port of OpenSpiel's JAX policy_gradient)
     dqn.py                DQN (port of OpenSpiel's JAX dqn)
     generator.py          GEMS generator (hyper / conditional), critic, GeneratorPolicy
     networks.py           encoders (Nature-DQN CNN for images, flatten otherwise)
-    ppo.py                PPO, for the future self-play `ppo` method
+    ppo.py                PPO: post-hoc best response, and the PSRO `ppo` oracle
   exploitability.py       exact NashConv; mixture -> behaviour policy by reach
   budget.py               BudgetTracker, in env steps
   evaluation.py           Evaluator + metric registry (vs_random, self_play)

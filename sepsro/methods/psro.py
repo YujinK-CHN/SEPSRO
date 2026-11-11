@@ -19,6 +19,8 @@ One iteration (AbstractMetaTrainer.iteration):
 
 Oracles (--psro-oracle): 'pg' and 'dqn' are psro_v2's RL oracle with its two
 learners; 'br' is its exact best response (OpenSpiel turn-based games only).
+'ppo' is the same RL oracle with a PPO learner (not in psro_v2): GEMS trains
+its best responses with PPO, so this is the oracle-aligned PSRO.
 
 Training-strategy selector: in psro_v2 it picks which existing policy each
 new response is trained FROM. A response is a copy of it only when the learner

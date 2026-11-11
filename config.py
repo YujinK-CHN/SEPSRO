@@ -24,7 +24,7 @@ Groups:
     eval        evaluation protocol (identical for every method)
     psro        PSRO loop (names and defaults follow OpenSpiel's psro_v2)
     pg / dqn    the RL oracle's learners (psro_v2_example.py's settings)
-    ppo         PPO learner, for the future self-play `ppo` method
+    ppo         PPO learner: the post-hoc best response, and PSRO's --psro-oracle ppo
     gems        GEMS (defaults from the paper's Kuhn-poker reference settings)
     exploit     post-hoc approximate NashConv (posthoc.py), with a PPO best response
 """
@@ -138,9 +138,13 @@ ENV_OVERRIDES = {
         'gems_oracle_rollouts': 4,
         'gems_eta': 0.5,
         'gems_abr_lr': 1e-3,
-        # approximate NashConv: PPO best response per seat, Atari PPO clip
+        # approximate NashConv: PPO best response per seat, 5M steps
         'exploit_steps': 5_000_000,
+        # the ppo group (post-hoc best response and --psro-oracle ppo): Atari PPO clip
         'ppo_clip': 0.1,
+        # Raw scores are 5-200 per hit and ~500 per episode; 0.01 keeps the
+        # critic's targets O(1). A constant: the best response still maximises score.
+        'ppo_reward_scale': 0.01,
     },
 }
 
@@ -186,10 +190,16 @@ def _add_eval_config(parser):
 def _add_psro_config(parser):
     # Names and defaults follow OpenSpiel's psro_v2 / psro_v2_example.py.
     group = parser.add_argument_group('psro')
-    group.add_argument('--psro-oracle', type=str, default='pg', choices=('pg', 'dqn', 'br'),
+    group.add_argument('--psro-oracle', type=str, default='pg', choices=('pg', 'dqn', 'ppo', 'br'),
                        help="Best-response oracle (psro_v2's oracle_type): RL with policy "
                             "gradient or DQN, or exact best response (OpenSpiel only; the "
-                            "example's default).")
+                            "example's default). 'ppo' is not in psro_v2: the same learner "
+                            "family as GEMS's ABR-TR, for oracle-aligned comparisons.")
+    # --psro-oracle ppo: the ppo group's settings unless one of these is given.
+    for name, kind in (('lr', float), ('rollout-steps', int), ('epochs', int),
+                       ('minibatches', int), ('clip', float), ('ent-coef', float)):
+        group.add_argument(f'--psro-ppo-{name}', type=kind, default=None,
+                           help=f'PPO oracle {name}; default: --ppo-{name}.')
     group.add_argument('--psro-iterations', type=int, default=None,
                        help='Optional cap on PSRO iterations (psro_v2_example: gpsro_iterations=100). '
                             'Default: none -- the env-step budget is the only stopping rule, so '
@@ -261,7 +271,8 @@ def _add_dqn_config(parser):
 
 
 def _add_ppo_config(parser):
-    # For the (future) self-play `ppo` method; PSRO does not use PPO.
+    # The post-hoc best-response learner (posthoc.py exploit), and the default
+    # settings of PSRO's --psro-oracle ppo (which --psro-ppo-* override).
     # Defaults are CleanRL's, except a smaller rollout for short board/card games.
     group = parser.add_argument_group('ppo')
     group.add_argument('--ppo-lr', type=float, default=2.5e-4)
@@ -276,6 +287,9 @@ def _add_ppo_config(parser):
     group.add_argument('--ppo-vf-coef', type=float, default=0.5)
     group.add_argument('--ppo-max-grad-norm', type=float, default=0.5)
     group.add_argument('--ppo-hidden', type=int, nargs='+', default=[128, 128])
+    group.add_argument('--ppo-reward-scale', type=float, default=1.0,
+                       help='Training rewards are multiplied by this (a constant, so the '
+                            'objective is unchanged); results stay in raw units.')
 
 
 def _add_gems_config(parser):

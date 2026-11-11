@@ -113,7 +113,50 @@ def test_dqn_oracle_best_responds():
     np.testing.assert_allclose(probs, [0, 1, 0])   # greedy, and paper
 
 
-@pytest.mark.parametrize('kind', ['pg', 'dqn'])
+def test_ppo_oracle_best_responds():
+    policy = _oracle_vs_rock('ppo', '--psro-ppo-lr', '1e-2', '--psro-ppo-rollout-steps', '64')
+    probs = policy.action_probs(np.ones(1, np.float32), np.ones(3, bool))
+    assert probs[1] > 0.9, probs     # paper beats rock
+
+
+def test_ppo_oracle_settings_and_final_update():
+    """--psro-ppo-* replace the ppo group's values only for the oracle; the last
+    partial rollout is spent by finish()."""
+    from sepsro.learners.ppo import PPOConfig, PPOOracleLearner, psro_ppo_config
+    from sepsro.rollout import play_episode
+    args = _args('--ppo-lr', '1e-4', '--ppo-clip', '0.1', '--psro-ppo-lr', '3e-3')
+    config = psro_ppo_config(args)
+    assert (config.lr, config.clip) == (3e-3, 0.1)
+    assert PPOConfig.from_args(args).lr == 1e-4          # the scorer's learner is untouched
+
+    env = make_env(parse_env('rps'))
+    config.rollout_steps = 10
+    learner = PPOOracleLearner(env.spec.obs_shape['player_0'], 3, config, seed=0)
+    rng = np.random.default_rng(0)
+    joint = {'player_0': learner.acting_policy(), 'player_1': FixedActionPolicy(0)}
+    for _ in range(13):
+        learner.end_episode(play_episode(env, joint, rng, record=True).trajectories['player_0'])
+    assert learner.updates == 1                          # one full rollout of 10
+    learner.finish()
+    assert learner.updates == 2 and not learner._buffer  # plus the last 3 transitions
+
+
+def test_ppo_reward_scale_scales_targets_only():
+    """GAE targets scale with --ppo-reward-scale; the logged return stays raw."""
+    from sepsro.learners.ppo import PPOConfig, PPOLearner
+    from sepsro.rollout import Transition
+    episode = [Transition(np.ones(1, np.float32), np.ones(3, bool), 1, reward=r,
+                          terminated=(i == 2), info={'logp': -1.1, 'value': 0.0})
+               for i, r in enumerate([100.0, 0.0, 200.0])]
+    out = {}
+    for scale in (1.0, 0.01):
+        learner = PPOLearner((1,), 3, PPOConfig(reward_scale=scale), seed=0)
+        out[scale] = learner._batch([episode])[-1].numpy()
+        assert learner.update([episode])['mean_return'] == 300.0
+    np.testing.assert_allclose(out[0.01], 0.01 * out[1.0], rtol=1e-6)
+
+
+@pytest.mark.parametrize('kind', ['pg', 'dqn', 'ppo'])
 def test_learners_respect_action_mask(kind):
     from sepsro.oracles import make_learner_factory
     env = make_env(parse_env('rps'))
@@ -270,6 +313,7 @@ except ImportError:
 @pytest.mark.parametrize('env_name, oracle', [
     ('tic_tac_toe', 'pg'),                                    # AEC, action masks
     ('connect_four', 'dqn'),                                  # AEC, action masks
+    ('tic_tac_toe', 'ppo'),                                   # AEC, action masks
     ('pettingzoo:pettingzoo.classic.rps_v2@parallel', 'pg'),  # Parallel API, truncation
 ])
 def test_psro_runs_on_pettingzoo(tmp_path, env_name, oracle):

@@ -6,6 +6,8 @@ meta-strategy (psro_v2's update_agents -> oracle(training_parameters)) and
 returns them frozen. The PSRO loop never knows how a response was computed.
 
     RLOracle            rl_oracle.RLOracle, with a PG or DQN learner per seat
+                        (psro_v2's two), or PPO (not in psro_v2; added so PSRO can
+                        use the same learner as GEMS's PPO-trained ABR-TR)
     BestResponseOracle  best_response_oracle.BestResponseOracle: exact, by
                         walking the game tree (OpenSpiel turn-based games only)
 
@@ -37,7 +39,7 @@ def random_count_weighted_choice(counts, rng):
 
 
 def make_learner_factory(kind, spec, args):
-    """seat, seed -> fresh learner, for --psro-oracle pg | dqn."""
+    """seat, seed -> fresh learner, for --psro-oracle pg | dqn | ppo."""
     if kind == 'pg':
         from .learners.pg import PGConfig, PGLearner
         config = PGConfig.from_args(args)
@@ -48,6 +50,11 @@ def make_learner_factory(kind, spec, args):
         config = DQNConfig.from_args(args)
         return lambda seat, seed: DQNLearner(spec.obs_shape[seat], spec.num_actions[seat],
                                              config, seed=seed)
+    if kind == 'ppo':
+        from .learners.ppo import PPOOracleLearner, psro_ppo_config
+        config = psro_ppo_config(args)
+        return lambda seat, seed: PPOOracleLearner(spec.obs_shape[seat], spec.num_actions[seat],
+                                                   config, seed=seed)
     raise ValueError(f'No learner for oracle {kind!r}.')
 
 
@@ -103,6 +110,10 @@ class RLOracle:
                 if on_episode:
                     on_episode(agent, episodes[agent], learners[agent], episode)
 
+        for learner in learners.values():   # PPO: spend the last partial rollout
+            finish = getattr(learner, 'finish', None)
+            if finish is not None:
+                finish()
         return {seat: (learners[seat].policy() if episodes[seat] else None, episodes[seat])
                 for seat in self.agents}
 

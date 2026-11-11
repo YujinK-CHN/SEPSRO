@@ -2,9 +2,10 @@
 PPO for one seat, against opponents held fixed.
 
 Used as the best-response learner of the post-hoc approximate NashConv
-(posthoc.py exploit), which must be the same for every method; PSRO's own
-oracles follow OpenSpiel's psro_v2 (pg.py, dqn.py) instead. The
-update follows CleanRL's ppo.py
+(posthoc.py exploit), which must be the same for every method, and -- through
+PPOOracleLearner at the end of this file -- as PSRO's `--psro-oracle ppo`, so
+that PSRO and GEMS (whose ABR-TR is PPO) can be compared with the same kind of
+best-response learner. The update follows CleanRL's ppo.py
 (clipped surrogate, GAE, advantage normalisation, value loss, entropy bonus,
 global gradient clipping), with two multi-agent changes:
 
@@ -14,6 +15,12 @@ global gradient clipping), with two multi-agent changes:
   * the bootstrap at an episode's end distinguishes termination (value 0) from
     truncation (value of the last observation), using the flags the env
     adapters report.
+
+Rewards are multiplied by `reward_scale` before GAE (a fixed constant, so the
+objective -- the expected return -- is unchanged, unlike CleanRL's Atari sign
+clipping, which would make the learner maximise hits instead of score and so
+not be a best response in the game's own payoffs). It keeps the value targets
+O(1) on games with large raw scores.
 
 Acting happens on a CPU copy of the network (`actor`), synced after every
 update: per-step single-observation forwards are faster on CPU, and the update
@@ -46,6 +53,7 @@ class PPOConfig:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     hidden: tuple = (128, 128)
+    reward_scale: float = 1.0        # rewards are multiplied by this for training only
 
     @classmethod
     def from_args(cls, args):
@@ -54,7 +62,19 @@ class PPOConfig:
                    gamma=args.ppo_gamma, gae_lambda=args.ppo_gae_lambda,
                    clip=args.ppo_clip, ent_coef=args.ppo_ent_coef,
                    vf_coef=args.ppo_vf_coef, max_grad_norm=args.ppo_max_grad_norm,
-                   hidden=tuple(args.ppo_hidden))
+                   hidden=tuple(args.ppo_hidden), reward_scale=args.ppo_reward_scale)
+
+
+def psro_ppo_config(args):
+    """PSRO's PPO oracle: the ppo group (+ ENV_OVERRIDES), with any --psro-ppo-* set
+    replacing it. The ppo group is also the post-hoc scorer's learner, so tuning the
+    oracle through --psro-ppo-* leaves the scoring protocol unchanged."""
+    config = PPOConfig.from_args(args)
+    for field in ('lr', 'rollout_steps', 'epochs', 'minibatches', 'clip', 'ent_coef'):
+        value = getattr(args, f'psro_ppo_{field}', None)
+        if value is not None:
+            setattr(config, field, value)
+    return config
 
 
 class NetworkPolicy(Policy):
@@ -201,7 +221,9 @@ class PPOLearner:
         obs, masks, actions, logps, advantages, returns = [], [], [], [], [], []
         for ep in episodes:
             values = np.array([t.info['value'] for t in ep])
-            rewards = np.array([t.reward for t in ep])
+            # Training reward only: the critic learns scaled returns, while
+            # mean_return in the stats and every evaluation stay in raw units.
+            rewards = np.array([t.reward for t in ep]) * cfg.reward_scale
             last = ep[-1]
             if last.terminated or last.next_obs is None:
                 bootstrap = 0.0
@@ -235,3 +257,66 @@ class PPOLearner:
                 tensor(actions, torch.long), tensor(logps, torch.float32),
                 tensor(np.concatenate(advantages), torch.float32),
                 tensor(np.concatenate(returns), torch.float32))
+
+
+class PPOOracleLearner:
+    """PPOLearner behind the episode-at-a-time interface of PSRO's RLOracle.
+
+    RLOracle plays the episodes and hands this learner its seat's trajectory
+    after each one (end_episode); every `rollout_steps` collected transitions
+    trigger one PPO update (epochs x minibatches), as in PPOLearner.train. The
+    acting policy is the CPU actor, which changes only at an update, so the
+    log-probs and values PPO needs are recomputed exactly from the actor when
+    an episode ends. finish() spends the last partial rollout on one more
+    update, so no experience the budget paid for is thrown away.
+    """
+
+    policy_cls = NetworkPolicy
+
+    def __init__(self, obs_shape, num_actions, config: PPOConfig, seed=0):
+        self.ppo = PPOLearner(obs_shape, num_actions, config, seed=seed)
+        self._buffer, self._count = [], 0
+        self.updates = 0
+        self.last_losses = {}
+
+    def acting_policy(self) -> Policy:
+        """The live actor (not a copy): it follows every update."""
+        return NetworkPolicy(self.ppo.actor)
+
+    def policy(self) -> NetworkPolicy:
+        return self.ppo.policy()
+
+    def load_from(self, policy, sigma=0.0):
+        """Start from an existing PPO policy's weights, plus N(0, sigma) noise."""
+        self.ppo.net.load_state_dict(policy.net.state_dict())
+        if sigma > 0:
+            with torch.no_grad():
+                for param in self.ppo.net.parameters():
+                    param.add_(torch.randn_like(param) * sigma)
+        self.ppo._sync_actor()
+
+    def end_episode(self, trajectory):
+        if not trajectory:
+            return
+        obs = torch.as_tensor(np.stack([np.asarray(t.obs) for t in trajectory]))
+        masks = torch.as_tensor(np.stack([t.legal_mask for t in trajectory]), dtype=torch.bool)
+        actions = torch.as_tensor([t.action for t in trajectory])
+        with torch.no_grad():
+            logits, values = self.ppo.actor(obs, masks)
+        logp = torch.log_softmax(logits.double(), -1).gather(1, actions[:, None]).squeeze(1)
+        for t, lp, v in zip(trajectory, logp.tolist(), values.tolist()):
+            t.info['logp'], t.info['value'] = lp, v
+        self._buffer.append(trajectory)
+        self._count += len(trajectory)
+        if self._count >= self.ppo.config.rollout_steps:
+            self._update()
+
+    def finish(self):
+        if self._buffer:
+            self._update()
+
+    def _update(self):
+        stats = self.ppo.update(self._buffer)
+        self._buffer, self._count = [], 0
+        self.updates += 1
+        self.last_losses = {k: stats[k] for k in ('pg_loss', 'v_loss', 'entropy', 'clip_frac')}
