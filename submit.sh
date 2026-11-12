@@ -57,6 +57,7 @@
 #   --cpus      (or $SEPSRO_CPUS)      default 4  (also torch / OpenMP threads)
 #   --gpus      (or $SEPSRO_GPUS)      default 0
 #   --gpu-type  (or $SEPSRO_GPU_TYPE)  e.g. h100; with --gpus
+#   --exclude   (or $SEPSRO_EXCLUDE)   nodes to avoid, e.g. fc30564,fc30613 (broken nodes)
 #   --venv      (or $SEPSRO_VENV)      default ~/venvs/sepsro
 #   --out-root  (or $SEPSRO_OUT)       default <repo>/results; ~/scratch/... for big sweeps
 #   --python-module                    default python/3.11 (must match setup_cluster.sh)
@@ -73,6 +74,7 @@ MEM="${SEPSRO_MEM:-16G}"
 CPUS="${SEPSRO_CPUS:-4}"
 GPUS="${SEPSRO_GPUS:-0}"
 GPU_TYPE="${SEPSRO_GPU_TYPE:-}"
+EXCLUDE="${SEPSRO_EXCLUDE:-}"
 VENV="${SEPSRO_VENV:-$HOME/venvs/sepsro}"
 OUT_ROOT="${SEPSRO_OUT:-$REPO/results}"
 PYTHON_MODULE="${SEPSRO_PYTHON_MODULE:-python/3.11}"
@@ -96,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --cpus)     CPUS="$2";     shift 2;;
     --gpus)     GPUS="$2";     shift 2;;
     --gpu-type) GPU_TYPE="$2"; shift 2;;
+    --exclude)  EXCLUDE="$2";  shift 2;;
     --venv)     VENV="$2";     shift 2;;
     --out-root) OUT_ROOT="$2"; shift 2;;
     --python-module) PYTHON_MODULE="$2"; shift 2;;
@@ -259,6 +262,10 @@ esac
 if [[ "$GPUS" != "0" ]]; then
   GRES_LINE="#SBATCH --gres=gpu:${GPU_TYPE:+${GPU_TYPE}:}${GPUS}"
 fi
+EXCLUDE_LINE=""
+if [[ -n "$EXCLUDE" ]]; then
+  EXCLUDE_LINE="#SBATCH --exclude=${EXCLUDE}"
+fi
 
 cat > "$JOB" <<EOF
 #!/bin/bash
@@ -270,6 +277,7 @@ cat > "$JOB" <<EOF
 #SBATCH --time=${TIME}
 #SBATCH --output=${SLURM_DIR}/%x-%A_%a.out
 ${GRES_LINE}
+${EXCLUDE_LINE}
 
 set -euo pipefail
 TASKS=(

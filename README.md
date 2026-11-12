@@ -47,7 +47,7 @@ from PyPI otherwise (compute nodes have no internet, so everything is installed
 up front). One `submit.sh` call is one task of one [round](#rounds): exactly
 one `--method`, a required `--exp-name`, one Slurm array task per seed,
 CPU-only by default (`--cpus 4 --mem 16G --time 24:00:00`; `--gpus 1` if ever
-needed); every other flag goes to `main.py`. Before submitting it builds the
+needed; `--exclude fc30564,...` keeps tasks off broken nodes); every other flag goes to `main.py`. Before submitting it builds the
 env once on the login node and refuses what `main.py` would refuse: seeds that
 already hold logs (unless `--overwrite`) and settings that differ from the
 round's. `--dry-run` writes and prints the job script only. Job scripts and
