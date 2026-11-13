@@ -56,18 +56,11 @@ class HyperGenerator(nn.Module):
         self.shapes = [(policy_hidden, obs_dim), (policy_hidden,),
                        (num_actions, policy_hidden), (num_actions,)]
         self.num_params = sum(int(np.prod(s)) for s in self.shapes)
+        # PyTorch's default initialisation (the paper does not specify one). An
+        # earlier version shrank the z-dependent output weights x0.1 and put the
+        # policy weights in the shared bias, which made all anchors start as
+        # near-copies (mean TV distance 0.008 vs 0.08 on Kuhn / Leduc).
         self.hyper = _mlp(latent_dim, hyper_hidden, self.num_params)
-        # Generated weights start at the usual per-layer scale (std 1/sqrt(fan_in))
-        # with a small output layer, so every z starts near the uniform policy;
-        # the small z-dependent part (weight * 0.1) gives anchors their spread.
-        with torch.no_grad():
-            self.hyper[-1].weight.mul_(0.1)
-            bias, i = self.hyper[-1].bias, 0
-            for shape, std in zip(self.shapes, (1 / np.sqrt(obs_dim), 0.0,
-                                                0.01 / np.sqrt(policy_hidden), 0.0)):
-                n = int(np.prod(shape))
-                bias[i:i + n].normal_(0.0, std) if std else bias[i:i + n].zero_()
-                i += n
 
     def params(self, z):
         """z: [B, d] -> flat policy parameters [B, P]."""

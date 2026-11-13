@@ -281,6 +281,8 @@ Where the paper is silent or ambiguous, the choice made here:
 | | paper | here |
 |---|---|---|
 | Generator | "hypernetwork", "standard MLP" | MLP z -> weights of a 1-hidden-layer (64, tanh) policy (`--gems-generator hyper`); `conditional` = MLP([obs, z]) |
+| Generator initialisation | not given | PyTorch's default (an earlier version shrank the z-dependent weights x0.1, so all anchors started as near-copies) |
+| MC opponents (Phase 1) | one batch {j_s} ~ sigma_{t-1} (Algorithm 1) | the same: one batch per seat and iteration, shared by every anchor |
 | Critic for GAE | not described | V(obs, z) MLP, lr 1e-3, gamma 0.99, lambda 0.95 |
 | ABR-TR optimiser | "PPO with GAE", no settings | each of the K_ABR steps: one fresh batch, 4 epochs x 4 minibatches of the clipped surrogate (clip 0.2) + beta_KL x KL to the generator at the start of the phase (`--gems-abr-epochs/-minibatches/-clip`; `1 1 0` = one plain PG step) |
 | Reward scale | assumed in [0, 1] | normalised per seat: OpenSpiel min/max utility, matrix payoff range, else range seen in random play |

@@ -7,9 +7,9 @@ Each seat p keeps (App. F / H, the per-player form of Algorithm 1):
     sigma_p   meta-strategy over Z_p, initialised uniform
 
 One iteration (Algorithm 1):
-  1. Meta-game estimation (MC). For every anchor i of seat p, play
-     N_MC opponents sampled from the other seats' sigma, M_MC episodes each:
-     v_p[i] = mean normalised return. No payoff table is ever built.
+  1. Meta-game estimation (MC). Sample ONE batch of N_MC opponents from the
+     other seats' sigma; every anchor i of seat p plays each of them M_MC
+     episodes: v_p[i] = mean normalised return. No payoff table is ever built.
   2. Meta-strategy update (optimistic MWU):
         sigma_p(i) ~ sigma_p(i) * exp(eta_t * (2 v_p[i] - v_prev_p[i] - r_p))
   3. Population expansion (EB-UCB oracle). Candidates: |mut| codes mutated from
@@ -285,10 +285,21 @@ class GEMS(Method):
 
     # Phase 1 --------------------------------------------------------------
     def _estimate(self, p):
+        """Algorithm 1, Phase 1: ONE opponent batch {j_s} ~ sigma_{t-1}, shared by every
+        anchor, M_MC episodes per (anchor, opponent) pair -- so anchors are compared on
+        the same opponents (common random numbers), as the paper's estimator does."""
         a = self.args
-        v = np.array([self._returns_vs_sigma(p, member, a.gems_mc_opponents,
-                                             a.gems_mc_rollouts).mean()
-                      for member in self._members[p]])
+        batch = [self._opponents(p) for _ in range(a.gems_mc_opponents)]
+        v = []
+        for member in self._members[p]:
+            out = []
+            for opponents in batch:
+                joint = dict(opponents)
+                joint[p] = member
+                for _ in range(a.gems_mc_rollouts):
+                    out.append(self._norm(p, self._play(joint).returns[p]))
+            v.append(np.mean(out))
+        v = np.array(v)
         if a.gems_ema > 0:
             prev = self.v_ema[p]
             v = np.where(np.isnan(prev), v, (1 - a.gems_ema) * prev + a.gems_ema * v)
